@@ -17,7 +17,7 @@ type ErrorHandler func(e error) *discordgo.MessageSend
 type HelpHandler func(*Gumi, *discordgo.Session, *discordgo.MessageCreate, []string) *discordgo.MessageSend
 
 //PrefixResolver ...
-type PrefixResolver func() []string
+type PrefixResolver func(*discordgo.Session, *discordgo.MessageCreate) []string
 
 //Gumi is a command framework for DiscordGo
 type Gumi struct {
@@ -30,7 +30,7 @@ type Gumi struct {
 }
 
 func defaultHelp(g *Gumi, s *discordgo.Session, m *discordgo.MessageCreate, args []string) *discordgo.MessageSend {
-	prefix := g.PrefixHandler()
+	prefix := g.PrefixHandler(s, m)
 
 	embed := &discordgo.MessageEmbed{
 		Description: fmt.Sprintf("Use ``%vhelp <group name> <command name>`` for extended help on specific commands.", prefix[0]),
@@ -116,7 +116,7 @@ func defaultError(e error) *discordgo.MessageSend {
 func NewGumi(opts ...Option) *Gumi {
 	var (
 		defaultPrefix        = []string{"?"}
-		defaultPrefixHandler = func() []string {
+		defaultPrefixHandler = func(*discordgo.Session, *discordgo.MessageCreate) []string {
 			return utils.MapString(defaultPrefix, func(s string) string {
 				return strings.ToLower(s)
 			})
@@ -162,7 +162,7 @@ func (g *Gumi) Handle(s *discordgo.Session, m *discordgo.MessageCreate) {
 		//reserved for logrus
 	}
 
-	if content, isCommand := g.trimPrefix(content); isCommand {
+	if content, isCommand := g.trimPrefix(s, m, content); isCommand {
 		fields := strings.Fields(content)
 		if len(fields) == 0 {
 			return
@@ -198,8 +198,8 @@ func (g *Gumi) Handle(s *discordgo.Session, m *discordgo.MessageCreate) {
 	}
 }
 
-func (g *Gumi) trimPrefix(content string) (string, bool) {
-	prefixes := g.PrefixHandler()
+func (g *Gumi) trimPrefix(s *discordgo.Session, m *discordgo.MessageCreate, content string) (string, bool) {
+	prefixes := g.PrefixHandler(s, m)
 	trimmed := false
 
 	for _, prefix := range prefixes {
