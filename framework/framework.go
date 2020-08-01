@@ -139,6 +139,10 @@ func NewGumi(opts ...Option) *Gumi {
 
 //Handle ...
 func (g *Gumi) Handle(s *discordgo.Session, m *discordgo.MessageCreate) {
+	if m.Author.Bot {
+		return
+	}
+
 	var (
 		content = strings.ToLower(m.Content)
 		isGuild = m.GuildID != ""
