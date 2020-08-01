@@ -134,6 +134,15 @@ func NewGumi(opts ...Option) *Gumi {
 		opt(g)
 	}
 
+	if g.HelpCommand != nil {
+		general := g.AddGroup("general", GroupDescription("General purpose commands"))
+		general.AddCommand("help", func(s *discordgo.Session, m *discordgo.MessageCreate, args []string) error {
+			help := g.HelpCommand(g, s, m, args)
+			_, err := s.ChannelMessageSendComplex(m.ChannelID, help)
+			return err
+		}, CommandDescription("Sends this message."))
+	}
+
 	return g
 }
 
