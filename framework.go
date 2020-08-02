@@ -62,10 +62,10 @@ func NewGumi(opts ...Option) *Gumi {
 	return g
 }
 
-//Handle invokes a command handler for Gumi instance, should be called from within MessageCreate event in discordgo application.
-func (g *Gumi) Handle(s *discordgo.Session, m *discordgo.MessageCreate) {
+//Handle invokes a command handler for Gumi instance, should be called from within MessageCreate event in discordgo application. Returns true if handled a valid command
+func (g *Gumi) Handle(s *discordgo.Session, m *discordgo.MessageCreate) bool {
 	if m.Author.Bot {
-		return
+		return false
 	}
 
 	var (
@@ -81,7 +81,7 @@ func (g *Gumi) Handle(s *discordgo.Session, m *discordgo.MessageCreate) {
 	if content, isCommand := g.trimPrefix(s, m, content); isCommand {
 		fields := strings.Fields(content)
 		if len(fields) == 0 {
-			return
+			return false
 		}
 		command := fields[0]
 		args := fields[1:]
@@ -90,13 +90,13 @@ func (g *Gumi) Handle(s *discordgo.Session, m *discordgo.MessageCreate) {
 			if cmd, ok := group.Commands[command]; ok {
 				if cmd.GuildOnly && !isGuild {
 					g.ErrorHandler(errNotGuild(cmd.Name))
-					return
+					return true
 				}
 
 				if cmd.NSFW && !channel.NSFW {
 					prompt := utils.CreatePrompt(s, m, utils.NewPromptOptions("You're trying to execute a NSFW command in SFW channel, are you sure about that?", 15*time.Second))
 					if !prompt {
-						return
+						return true
 					}
 				}
 
@@ -111,7 +111,11 @@ func (g *Gumi) Handle(s *discordgo.Session, m *discordgo.MessageCreate) {
 				}()
 			}
 		}
+
+		return true
 	}
+
+	return false
 }
 
 func (g *Gumi) trimPrefix(s *discordgo.Session, m *discordgo.MessageCreate, content string) (string, bool) {

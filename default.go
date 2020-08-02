@@ -76,17 +76,20 @@ func defaultHelp(g *Gumi, s *discordgo.Session, m *discordgo.MessageCreate, args
 }
 
 func defaultError(e error) *discordgo.MessageSend {
-	embed := &discordgo.MessageEmbed{
-		Title: "Oops, something went wrong!",
-		Thumbnail: &discordgo.MessageEmbedThumbnail{
-			URL: utils.EmbedImage,
-		},
-		Description: fmt.Sprintf("***Error message:***\n%v", e),
-		Color:       utils.EmbedColor,
-		Timestamp:   utils.EmbedTimestamp(),
-	}
+	if e != nil {
+		embed := &discordgo.MessageEmbed{
+			Title: "Oops, something went wrong!",
+			Thumbnail: &discordgo.MessageEmbedThumbnail{
+				URL: utils.EmbedImage,
+			},
+			Description: fmt.Sprintf("***Error message:***\n%v", e),
+			Color:       utils.EmbedColor,
+			Timestamp:   utils.EmbedTimestamp(),
+		}
 
-	return &discordgo.MessageSend{
-		Embed: embed,
+		return &discordgo.MessageSend{
+			Embed: embed,
+		}
 	}
+	return nil
 }
