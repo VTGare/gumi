@@ -1,8 +1,6 @@
 package gumi
 
 import (
-	"errors"
-	"fmt"
 	"strings"
 	"time"
 
@@ -17,11 +15,11 @@ type ErrorHandler func(e error) *discordgo.MessageSend
 type HelpHandler func(*Gumi, *discordgo.Session, *discordgo.MessageCreate, []string) *discordgo.MessageSend
 
 //PrefixResolver ...
-type PrefixResolver func(*discordgo.Session, *discordgo.MessageCreate) []string
+type PrefixResolver func(*Gumi, *discordgo.Session, *discordgo.MessageCreate) []string
 
 //Gumi is a command framework for DiscordGo
 type Gumi struct {
-	Groups map[string]*GumiGroup
+	Groups map[string]*Group
 	//UngroupedCommands map[string]*GumiCommand
 	DefaultPrefixes []string
 	HelpCommand     HelpHandler
@@ -29,101 +27,19 @@ type Gumi struct {
 	PrefixHandler   PrefixResolver
 }
 
-func defaultHelp(g *Gumi, s *discordgo.Session, m *discordgo.MessageCreate, args []string) *discordgo.MessageSend {
-	prefix := g.PrefixHandler(s, m)
-
-	embed := &discordgo.MessageEmbed{
-		Description: fmt.Sprintf("Use ``%vhelp <group name> <command name>`` for extended help on specific commands.", prefix[0]),
-		Color:       utils.EmbedColor,
-		Timestamp:   utils.EmbedTimestamp(),
-		Thumbnail: &discordgo.MessageEmbedThumbnail{
-			URL: utils.EmbedImage,
-		},
-	}
-
-	switch len(args) {
-	case 0:
-		embed.Title = "Help"
-		for _, group := range g.Groups {
-			if group.IsVisible {
-				field := &discordgo.MessageEmbedField{
-					Name:  group.Name,
-					Value: group.Description,
-				}
-				embed.Fields = append(embed.Fields, field)
-			}
-		}
-	case 1:
-		if group, ok := g.Groups[args[0]]; ok {
-			embed.Title = fmt.Sprintf("%v group command list", args[0])
-
-			used := map[string]bool{}
-			for _, command := range group.Commands {
-				_, ok := used[command.Name]
-				if command.Help.IsVisible && !ok {
-					field := &discordgo.MessageEmbedField{
-						Name:  command.Name,
-						Value: command.createHelp(),
-					}
-					used[command.Name] = true
-					embed.Fields = append(embed.Fields, field)
-				}
-			}
-		} else {
-			return g.ErrorHandler(fmt.Errorf("unknown group %v", args[0]))
-		}
-	case 2:
-		if group, ok := g.Groups[args[0]]; ok {
-			if command, ok := group.Commands[args[1]]; ok {
-				if command.Help.IsVisible && command.Help.ExtendedHelp != nil {
-					embed.Title = fmt.Sprintf("%v command extended help", command.Name)
-					embed.Fields = command.Help.ExtendedHelp
-				} else {
-					return g.ErrorHandler(fmt.Errorf("command %v is invisible or doesn't have extended help", args[0]))
-				}
-			} else {
-				return g.ErrorHandler(fmt.Errorf("unknown command %v", args[1]))
-			}
-		} else {
-			return g.ErrorHandler(fmt.Errorf("unknown group %v", args[0]))
-		}
-	default:
-		return g.ErrorHandler(errors.New("incorrect command usage. Example: bt!help <group> <command name>"))
-	}
-
-	return &discordgo.MessageSend{
-		Embed: embed,
-	}
-}
-
-func defaultError(e error) *discordgo.MessageSend {
-	embed := &discordgo.MessageEmbed{
-		Title: "Oops, something went wrong!",
-		Thumbnail: &discordgo.MessageEmbedThumbnail{
-			URL: utils.EmbedImage,
-		},
-		Description: fmt.Sprintf("***Error message:***\n%v", e),
-		Color:       utils.EmbedColor,
-		Timestamp:   utils.EmbedTimestamp(),
-	}
-
-	return &discordgo.MessageSend{
-		Embed: embed,
-	}
-}
-
 //NewGumi creates a new Gumi instance
 func NewGumi(opts ...Option) *Gumi {
 	var (
 		defaultPrefix        = []string{"?"}
-		defaultPrefixHandler = func(*discordgo.Session, *discordgo.MessageCreate) []string {
-			return utils.MapString(defaultPrefix, func(s string) string {
+		defaultPrefixHandler = func(g *Gumi, s *discordgo.Session, m *discordgo.MessageCreate) []string {
+			return utils.MapString(g.DefaultPrefixes, func(s string) string {
 				return strings.ToLower(s)
 			})
 		}
 	)
 
 	g := &Gumi{
+		Groups:          make(map[string]*Group),
 		DefaultPrefixes: defaultPrefix,
 		HelpCommand:     defaultHelp,
 		ErrorHandler:    defaultError,
@@ -146,7 +62,7 @@ func NewGumi(opts ...Option) *Gumi {
 	return g
 }
 
-//Handle ...
+//Handle invokes a command handler for Gumi instance, should be called from within MessageCreate event in discordgo application.
 func (g *Gumi) Handle(s *discordgo.Session, m *discordgo.MessageCreate) {
 	if m.Author.Bot {
 		return
@@ -199,7 +115,7 @@ func (g *Gumi) Handle(s *discordgo.Session, m *discordgo.MessageCreate) {
 }
 
 func (g *Gumi) trimPrefix(s *discordgo.Session, m *discordgo.MessageCreate, content string) (string, bool) {
-	prefixes := g.PrefixHandler(s, m)
+	prefixes := g.PrefixHandler(g, s, m)
 	trimmed := false
 
 	for _, prefix := range prefixes {
@@ -212,9 +128,33 @@ func (g *Gumi) trimPrefix(s *discordgo.Session, m *discordgo.MessageCreate, cont
 	return content, trimmed
 }
 
-func (g *Gumi) AddGroup(name string, opts ...GroupOption) *GumiGroup {
+//AddGroup creates a new group with given name and parameters. Please don't directly modify it, use functions instead.
+func (g *Gumi) AddGroup(name string, opts ...GroupOption) *Group {
 	group := newGroup(name, opts...)
 	g.Groups[name] = group
 
 	return group
+}
+
+//SetPrefixHandler sets a PrefixHandler for GumiInstance
+func (g *Gumi) SetPrefixHandler(ph PrefixResolver) *Gumi {
+	g.PrefixHandler = ph
+	return g
+}
+
+//SetErrorHandler sets an ErrorHandler for Gumi instance
+func (g *Gumi) SetErrorHandler(eh ErrorHandler) *Gumi {
+	g.ErrorHandler = eh
+	return g
+}
+
+//SetHelpCommand sets a HelpHandler for Gumi instance
+func (g *Gumi) SetHelpCommand(hc HelpHandler) *Gumi {
+	g.HelpCommand = hc
+	return g
+}
+
+//GeneralGroup returns a group autogenerated for help command and should be used for general-purpose commands. Although, you can modify it for your needs.
+func (g *Gumi) GeneralGroup() *Group {
+	return g.Groups["general"]
 }

@@ -7,7 +7,7 @@ import (
 	"github.com/bwmarrin/discordgo"
 )
 
-type GumiCommand struct {
+type Command struct {
 	Name        string
 	Aliases     []string
 	Description string
@@ -19,23 +19,29 @@ type GumiCommand struct {
 
 type GumiExec func(*discordgo.Session, *discordgo.MessageCreate, []string) error
 
-type CommandOption func(*GumiCommand)
+type CommandOption func(*Command)
 
 func CommandDescription(desc string) CommandOption {
-	return func(c *GumiCommand) {
+	return func(c *Command) {
 		c.Description = desc
 	}
 }
 
 func GuildOnly() CommandOption {
-	return func(c *GumiCommand) {
+	return func(c *Command) {
 		c.GuildOnly = true
 	}
 }
 
 func WithHelp(hs *HelpSettings) CommandOption {
-	return func(g *GumiCommand) {
+	return func(g *Command) {
 		g.Help = hs
+	}
+}
+
+func WithAliases(aliases ...string) CommandOption {
+	return func(g *Command) {
+		g.Aliases = aliases
 	}
 }
 
@@ -63,8 +69,8 @@ func (hs *HelpSettings) AddField(name, value string, inline bool) *HelpSettings 
 	return hs
 }
 
-func NewCommand(name string, exec GumiExec, opts ...CommandOption) *GumiCommand {
-	command := &GumiCommand{
+func NewCommand(name string, exec GumiExec, opts ...CommandOption) *Command {
+	command := &Command{
 		Name:        name,
 		Exec:        exec,
 		Aliases:     make([]string, 0),
@@ -81,7 +87,7 @@ func NewCommand(name string, exec GumiExec, opts ...CommandOption) *GumiCommand 
 	return command
 }
 
-func (c *GumiCommand) createHelp() string {
+func (c *Command) createHelp() string {
 	str := ""
 	if len(c.Aliases) != 0 {
 		str += fmt.Sprintf("**Aliases:** %v\n", strings.Join(c.Aliases, ", "))
