@@ -6,6 +6,7 @@ import (
 
 	"github.com/VTGare/gumi/utils"
 	"github.com/bwmarrin/discordgo"
+	"github.com/sirupsen/logrus"
 )
 
 //ErrorHandler is a function that handles all errors caused by user commands, if nil uses default.
@@ -101,6 +102,7 @@ func (g *Gumi) Handle(s *discordgo.Session, m *discordgo.MessageCreate) bool {
 				}
 
 				go func() {
+					logrus.Infof("Executing command: %s. Arguments: %v", cmd.Name, args)
 					err := cmd.Exec(s, m, args)
 					if errorMessage := g.ErrorHandler(err); errorMessage != nil {
 						_, err := s.ChannelMessageSendComplex(m.ChannelID, errorMessage)
