@@ -1,6 +1,7 @@
 package gumi
 
 import (
+	"fmt"
 	"strings"
 	"time"
 
@@ -20,8 +21,7 @@ type PrefixResolver func(*Gumi, *discordgo.Session, *discordgo.MessageCreate) []
 
 //Gumi is a command framework for DiscordGo
 type Gumi struct {
-	Groups map[string]*Group
-	//UngroupedCommands map[string]*GumiCommand
+	Groups          map[string]*Group
 	DefaultPrefixes []string
 	HelpCommand     HelpHandler
 	ErrorHandler    ErrorHandler
@@ -52,12 +52,16 @@ func NewGumi(opts ...Option) *Gumi {
 	}
 
 	if g.HelpCommand != nil {
-		general := g.AddGroup("general", GroupDescription("General purpose commands"))
-		general.AddCommand("help", func(s *discordgo.Session, m *discordgo.MessageCreate, args []string) error {
-			help := g.HelpCommand(g, s, m, args)
-			_, err := s.ChannelMessageSendComplex(m.ChannelID, help)
-			return err
-		}, CommandDescription("Sends this message."))
+		general := g.AddGroup(&Group{"general", "General purpose commands", false, make(map[string]*Command, 0), true})
+		general.AddCommand(&Command{
+			Name:        "help",
+			Description: "Boe Tea's command list and documentation.",
+			Exec: func(s *discordgo.Session, m *discordgo.MessageCreate, args []string) error {
+				help := g.HelpCommand(g, s, m, args)
+				_, err := s.ChannelMessageSendComplex(m.ChannelID, help)
+				return err
+			},
+		})
 	}
 
 	return g
@@ -76,7 +80,7 @@ func (g *Gumi) Handle(s *discordgo.Session, m *discordgo.MessageCreate) bool {
 
 	channel, err := s.Channel(m.ChannelID)
 	if err != nil {
-		//reserved for logrus
+		logrus.Warnf("s.Channel(): %v", err)
 	}
 
 	if content, isCommand := g.trimPrefix(s, m, content); isCommand {
@@ -101,15 +105,25 @@ func (g *Gumi) Handle(s *discordgo.Session, m *discordgo.MessageCreate) bool {
 					}
 				}
 
+				if cd := cmd.onCooldown(m.Author.ID); cd != 0 {
+					_, err := s.ChannelMessageSend(m.ChannelID, fmt.Sprintf("Please wait %v before executing %v command again.", cd.Round(1*time.Second).String(), cmd.Name))
+					if err != nil {
+						logrus.Warnf("s.ChannelMessageSendComplex(): %v", err)
+					}
+					return true
+				}
+
 				go func() {
 					logrus.Infof("Executing command: %s. Arguments: %v", cmd.Name, args)
 					err := cmd.Exec(s, m, args)
 					if errorMessage := g.ErrorHandler(err); errorMessage != nil {
 						_, err := s.ChannelMessageSendComplex(m.ChannelID, errorMessage)
 						if err != nil {
-							//reserved for logrus warn log
+							logrus.Warnf("s.ChannelMessageSendComplex(): %v", err)
 						}
 					}
+
+					cmd.execMap[m.Author.ID] = time.Now()
 				}()
 			}
 		}
@@ -135,9 +149,11 @@ func (g *Gumi) trimPrefix(s *discordgo.Session, m *discordgo.MessageCreate, cont
 }
 
 //AddGroup creates a new group with given name and parameters. Please don't directly modify it, use functions instead.
-func (g *Gumi) AddGroup(name string, opts ...GroupOption) *Group {
-	group := newGroup(name, opts...)
-	g.Groups[name] = group
+func (g *Gumi) AddGroup(group *Group) *Group {
+	if group.Commands == nil {
+		group.Commands = make(map[string]*Command)
+	}
+	g.Groups[group.Name] = group
 
 	return group
 }

@@ -3,6 +3,7 @@ package gumi
 import (
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/bwmarrin/discordgo"
 )
@@ -37,27 +38,29 @@ func TestTrim(t *testing.T) {
 
 func TestAddGroup(t *testing.T) {
 	g := NewGumi()
-	g.AddGroup("test")
+	g.AddGroup(&Group{
+		Name: "test",
+	})
+
 	if _, ok := g.Groups["test"]; !ok {
 		t.Fatal("group not added")
-	}
-
-	test := g.AddGroup("test2", GroupDescription("test"), GroupNSFW())
-	if test.Description != "test" {
-		t.Fatal("description hasnt changed")
-	}
-
-	if !test.NSFW {
-		t.Fatal("NSFW hasnt changed")
 	}
 }
 
 func TestCommand(t *testing.T) {
 	g := NewGumi()
-	tg := g.AddGroup("test")
-	cmd := tg.AddCommand("test", func(s *discordgo.Session, m *discordgo.MessageCreate, args []string) error {
-		return nil
-	}, WithAliases("test1", "test2"))
+	tg := g.AddGroup(&Group{
+		Name: "test",
+	})
+
+	cmd := tg.AddCommand(&Command{
+		Name:        "test",
+		Aliases:     []string{"test1"},
+		Description: "test",
+		Exec:        func(*discordgo.Session, *discordgo.MessageCreate, []string) error { return nil },
+		Help:        nil,
+		Cooldown:    5 * time.Second,
+	})
 
 	if _, ok := tg.Commands["test1"]; !ok {
 		t.Fatal("alias not added")

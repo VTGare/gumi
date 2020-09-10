@@ -49,7 +49,23 @@ func defaultHelp(g *Gumi, s *discordgo.Session, m *discordgo.MessageCreate, args
 				}
 			}
 		} else {
-			return g.ErrorHandler(fmt.Errorf("unknown group %v", args[0]))
+			flag := false
+			for _, group := range g.Groups {
+				if command, ok := group.Commands[args[0]]; ok {
+					if command.Help.IsVisible && command.Help.ExtendedHelp != nil {
+						flag = true
+						embed.Title = fmt.Sprintf("%v command extended help", command.Name)
+						embed.Fields = command.Help.ExtendedHelp
+					} else {
+						return g.ErrorHandler(fmt.Errorf("command %v is invisible or doesn't have extended help", args[0]))
+					}
+					break
+				}
+			}
+
+			if !flag {
+				return g.ErrorHandler(fmt.Errorf("unknown group or command %v", args[0]))
+			}
 		}
 	case 2:
 		if group, ok := g.Groups[args[0]]; ok {

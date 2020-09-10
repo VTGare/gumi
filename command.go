@@ -3,6 +3,7 @@ package gumi
 import (
 	"fmt"
 	"strings"
+	"time"
 
 	"github.com/bwmarrin/discordgo"
 )
@@ -15,35 +16,11 @@ type Command struct {
 	NSFW        bool
 	Exec        GumiExec
 	Help        *HelpSettings
+	Cooldown    time.Duration
+	execMap     map[string]time.Time
 }
 
 type GumiExec func(*discordgo.Session, *discordgo.MessageCreate, []string) error
-
-type CommandOption func(*Command)
-
-func CommandDescription(desc string) CommandOption {
-	return func(c *Command) {
-		c.Description = desc
-	}
-}
-
-func GuildOnly() CommandOption {
-	return func(c *Command) {
-		c.GuildOnly = true
-	}
-}
-
-func WithHelp(hs *HelpSettings) CommandOption {
-	return func(g *Command) {
-		g.Help = hs
-	}
-}
-
-func WithAliases(aliases ...string) CommandOption {
-	return func(g *Command) {
-		g.Aliases = aliases
-	}
-}
 
 //HelpSettings are settings needed for default help command.
 type HelpSettings struct {
@@ -69,24 +46,6 @@ func (hs *HelpSettings) AddField(name, value string, inline bool) *HelpSettings 
 	return hs
 }
 
-func NewCommand(name string, exec GumiExec, opts ...CommandOption) *Command {
-	command := &Command{
-		Name:        name,
-		Exec:        exec,
-		Aliases:     make([]string, 0),
-		Description: "",
-		GuildOnly:   false,
-		NSFW:        false,
-		Help:        NewHelpSettings(),
-	}
-
-	for _, opt := range opts {
-		opt(command)
-	}
-
-	return command
-}
-
 func (c *Command) createHelp() string {
 	str := ""
 	if len(c.Aliases) != 0 {
@@ -95,4 +54,17 @@ func (c *Command) createHelp() string {
 	str += c.Description
 
 	return str
+}
+
+func (c *Command) onCooldown(id string) time.Duration {
+	if t, ok := c.execMap[id]; ok {
+		d := t.Sub(time.Now())
+		if d < c.Cooldown {
+			return c.Cooldown + (1 * d)
+		}
+		delete(c.execMap, id)
+		return 0
+	}
+
+	return 0
 }

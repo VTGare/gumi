@@ -1,5 +1,7 @@
 package gumi
 
+import "time"
+
 type Group struct {
 	Name        string
 	Description string
@@ -10,41 +12,26 @@ type Group struct {
 
 type GroupOption func(*Group)
 
-func GroupNSFW() GroupOption {
-	return func(g *Group) {
-		g.NSFW = true
-	}
-}
-
-func GroupDescription(desc string) GroupOption {
-	return func(g *Group) {
-		g.Description = desc
-	}
-}
-
-func newGroup(name string, opts ...GroupOption) *Group {
-	g := &Group{
-		Name:        name,
-		Commands:    make(map[string]*Command),
-		Description: "",
-		NSFW:        false,
-		IsVisible:   true,
-	}
-
-	for _, opt := range opts {
-		opt(g)
-	}
-
+func (g *Group) SetNSFW(v bool) *Group {
+	g.NSFW = v
 	return g
 }
 
-func (g *Group) AddCommand(name string, exec GumiExec, opts ...CommandOption) *Command {
-	command := NewCommand(name, exec, opts...)
+func (g *Group) SetDescription(s string) *Group {
+	g.Description = s
+	return g
+}
+
+func (g *Group) AddCommand(command *Command) *Command {
 	if g.NSFW {
-		command.NSFW = g.NSFW
+		command.NSFW = true
 	}
 
-	g.Commands[name] = command
+	if command.Cooldown != 0 {
+		command.execMap = make(map[string]time.Time)
+	}
+
+	g.Commands[command.Name] = command
 	for _, alias := range command.Aliases {
 		g.Commands[alias] = command
 	}
