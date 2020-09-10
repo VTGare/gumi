@@ -58,12 +58,15 @@ func (c *Command) createHelp() string {
 
 func (c *Command) onCooldown(id string) time.Duration {
 	if t, ok := c.execMap[id]; ok {
-		d := t.Sub(time.Now())
-		if d < c.Cooldown {
-			return c.Cooldown + (1 * d)
+		d := 1 * t.Sub(time.Now())
+
+		left := c.Cooldown + d
+		if left.Seconds() <= 0 {
+			delete(c.execMap, id)
+			return 0
 		}
-		delete(c.execMap, id)
-		return 0
+
+		return left
 	}
 
 	return 0

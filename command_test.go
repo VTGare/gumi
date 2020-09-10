@@ -21,6 +21,7 @@ func TestCommandOnCooldown(t *testing.T) {
 		{"3", &Command{execMap: map[string]time.Time{"1": time.Now()}, Cooldown: 5 * time.Second}, args{"1"}, 5 * time.Second},
 		{"4", &Command{execMap: map[string]time.Time{"1": time.Now().Add(-time.Second)}, Cooldown: 5 * time.Second}, args{"1"}, 4 * time.Second},
 		{"5", &Command{execMap: map[string]time.Time{"1": time.Now().Add(-2 * time.Second)}, Cooldown: 5 * time.Second}, args{"1"}, 3 * time.Second},
+		{"6", &Command{execMap: map[string]time.Time{"1": time.Now().Add(-6 * time.Second)}, Cooldown: 5 * time.Second}, args{"1"}, 0 * time.Second},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

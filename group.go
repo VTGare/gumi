@@ -27,6 +27,7 @@ func (g *Group) AddCommand(command *Command) *Command {
 		command.NSFW = true
 	}
 
+	command.Help = NewHelpSettings()
 	if command.Cooldown != 0 {
 		command.execMap = make(map[string]time.Time)
 	}
