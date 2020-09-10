@@ -123,6 +123,9 @@ func (g *Gumi) Handle(s *discordgo.Session, m *discordgo.MessageCreate) bool {
 						}
 					}
 
+					if cmd.execMap == nil {
+						cmd.execMap = make(map[string]time.Time)
+					}
 					cmd.execMap[m.Author.ID] = time.Now()
 				}()
 			}
