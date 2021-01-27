@@ -11,6 +11,7 @@ type Command struct {
 	Description string
 	Usage       string
 	Example     string
+	Flags       map[string]string
 	GuildOnly   bool
 	NSFW        bool
 	Permissions int
