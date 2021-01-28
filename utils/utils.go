@@ -6,14 +6,18 @@ import (
 	"github.com/bwmarrin/discordgo"
 )
 
-func HasPrefixes(s string, prefixes []string) (bool, string) {
+func HasPrefixes(str string, prefixes []string, caseSensitive bool) (bool, string) {
 	for _, prefix := range prefixes {
-		if strings.HasPrefix(s, prefix) {
-			return true, strings.TrimPrefix(s, prefix)
+		stringToCheck := str
+		if !caseSensitive {
+			stringToCheck = strings.ToLower(stringToCheck)
+			prefix = strings.ToLower(prefix)
+		}
+		if strings.HasPrefix(stringToCheck, prefix) {
+			return true, string(str[len(prefix):])
 		}
 	}
-
-	return false, s
+	return false, str
 }
 
 //MemberHasPermission checks if guild member has a permission to do something on a server.
@@ -45,4 +49,13 @@ func MemberHasPermission(s *discordgo.Session, guildID string, userID string, pe
 	}
 
 	return false, nil
+}
+
+func MapString(ss []string, f func(string) string) []string {
+	mapped := make([]string, 0, len(ss))
+	for _, s := range ss {
+		mapped = append(mapped, f(s))
+	}
+
+	return mapped
 }

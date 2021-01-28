@@ -69,7 +69,7 @@ func (r *Router) Handler() func(*discordgo.Session, *discordgo.MessageCreate) {
 			return
 		}
 
-		hasPrefix, content := utils.HasPrefixes(content, r.PrefixResolver(session, event))
+		hasPrefix, content := utils.HasPrefixes(content, r.PrefixResolver(session, event), r.CaseSensitive)
 		if !hasPrefix {
 			if r.NotCommandCallback != nil {
 				err := r.NotCommandCallback(session, event)
