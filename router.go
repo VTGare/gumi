@@ -1,6 +1,7 @@
 package gumi
 
 import (
+	"fmt"
 	"strings"
 
 	"github.com/VTGare/gumi/utils"
@@ -10,9 +11,11 @@ import (
 type Router struct {
 	Commands                map[string]*Command
 	CaseSensitive           bool
+	AuthorID                string
+	Storage                 *Storage
 	PrefixResolver          func(*discordgo.Session, *discordgo.MessageCreate) []string
-	NotCommandCallback      func(*discordgo.Session, *discordgo.MessageCreate) error
-	OnErrorCallback         func(*discordgo.Session, *discordgo.MessageCreate, error)
+	NotCommandCallback      func(*Ctx) error
+	OnErrorCallback         func(*Ctx, error)
 	OnRateLimitCallback     func(*Ctx) error
 	OnNoPermissionsCallback func(*Ctx) error
 	OnNSFWCallback          func(*Ctx) error
@@ -46,9 +49,13 @@ func Create(r *Router) *Router {
 	}
 
 	if r.OnErrorCallback == nil {
-		r.OnErrorCallback = func(s *discordgo.Session, m *discordgo.MessageCreate, err error) {
-			s.ChannelMessageSend(m.ChannelID, "An error occured: "+err.Error())
+		r.OnErrorCallback = func(ctx *Ctx, err error) {
+			ctx.Reply(fmt.Sprintf("An error occurred: %v", err))
 		}
+	}
+
+	r.Storage = &Storage{
+		innerMap: make(map[string]interface{}),
 	}
 
 	return r
@@ -72,9 +79,15 @@ func (r *Router) Handler() func(*discordgo.Session, *discordgo.MessageCreate) {
 		hasPrefix, content := utils.HasPrefixes(content, r.PrefixResolver(session, event), r.CaseSensitive)
 		if !hasPrefix {
 			if r.NotCommandCallback != nil {
-				err := r.NotCommandCallback(session, event)
+				ctx := &Ctx{
+					Session: session,
+					Event:   event,
+					Router:  r,
+				}
+
+				err := r.NotCommandCallback(ctx)
 				if err != nil {
-					r.OnErrorCallback(session, event, err)
+					r.OnErrorCallback(ctx, err)
 				}
 			}
 
@@ -104,7 +117,7 @@ func (r *Router) Handler() func(*discordgo.Session, *discordgo.MessageCreate) {
 			err := cmd.execute(ctx)
 			if err != nil {
 				if r.OnErrorCallback != nil {
-					r.OnErrorCallback(session, event, err)
+					r.OnErrorCallback(ctx, err)
 				}
 
 				return

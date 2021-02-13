@@ -14,6 +14,7 @@ type Command struct {
 	Flags       map[string]string
 	GuildOnly   bool
 	NSFW        bool
+	AuthorOnly  bool
 	Permissions int
 	RateLimiter *RateLimiter
 	Exec        ExecutionHandler
@@ -24,6 +25,12 @@ func (c *Command) execute(ctx *Ctx) error {
 		err := callback(ctx)
 		if err != nil {
 			return err
+		}
+	}
+
+	if c.AuthorOnly {
+		if ctx.Router.AuthorID != ctx.Event.Author.ID {
+			return nil
 		}
 	}
 
