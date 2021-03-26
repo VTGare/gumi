@@ -15,7 +15,7 @@ type Command struct {
 	GuildOnly   bool
 	NSFW        bool
 	AuthorOnly  bool
-	Permissions int
+	Permissions int64
 	RateLimiter *RateLimiter
 	Exec        ExecutionHandler
 }
