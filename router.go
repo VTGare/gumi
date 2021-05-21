@@ -20,6 +20,7 @@ type Router struct {
 	OnNoPermissionsCallback func(*Ctx) error
 	OnNSFWCallback          func(*Ctx) error
 	OnExecuteCallback       func(*Ctx) error
+	OnPanicCallBack         func(ctx *Ctx, recover interface{})
 }
 
 func (r *Router) RegisterCmd(command *Command) {
@@ -54,6 +55,15 @@ func Create(r *Router) *Router {
 		}
 	}
 
+	if r.OnPanicCallBack == nil {
+		r.OnPanicCallBack = func(ctx *Ctx, rec interface{}) {
+			fmt.Println("Recovering from panic. Error: ", rec)
+			if err, ok := rec.(error); ok {
+				r.OnErrorCallback(ctx, err)
+			}
+		}
+	}
+
 	r.Storage = &Storage{
 		innerMap: make(map[string]interface{}),
 	}
@@ -67,6 +77,13 @@ func (r *Router) Initialize(session *discordgo.Session) {
 
 func (r *Router) Handler() func(*discordgo.Session, *discordgo.MessageCreate) {
 	return func(session *discordgo.Session, event *discordgo.MessageCreate) {
+		ctx := &Ctx{}
+		defer func() {
+			if rec := recover(); rec != nil {
+				r.OnPanicCallBack(ctx, rec)
+			}
+		}()
+
 		var (
 			message = event.Message
 			content = event.Message.Content
@@ -79,7 +96,7 @@ func (r *Router) Handler() func(*discordgo.Session, *discordgo.MessageCreate) {
 		hasPrefix, content := utils.HasPrefixes(content, r.PrefixResolver(session, event), r.CaseSensitive)
 		if !hasPrefix {
 			if r.NotCommandCallback != nil {
-				ctx := &Ctx{
+				ctx = &Ctx{
 					Session: session,
 					Event:   event,
 					Router:  r,
@@ -106,7 +123,7 @@ func (r *Router) Handler() func(*discordgo.Session, *discordgo.MessageCreate) {
 		}
 
 		if cmd, ok := r.Commands[cmdName]; ok {
-			ctx := &Ctx{
+			ctx = &Ctx{
 				Session: session,
 				Event:   event,
 				Args:    ParseArguments(content),
