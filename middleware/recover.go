@@ -3,7 +3,7 @@ package middleware
 import (
 	"runtime/debug"
 
-	"github.com/VTGare/gumi"
+	"github.com/VTGare/gumi/v2"
 )
 
 // Recover turns panics into *gumi.PanicError, flowing through error

@@ -8,14 +8,14 @@ import (
 	"strconv"
 	"strings"
 	"unicode/utf8"
+
+	"github.com/disgoorg/disgo/discord"
+	"github.com/disgoorg/snowflake/v2"
 )
 
 var (
-	userMentionRe    = regexp.MustCompile(`^<@!?(\d+)>$`)
-	channelMentionRe = regexp.MustCompile(`^<#(\d+)>$`)
-	roleMentionRe    = regexp.MustCompile(`^<@&(\d+)>$`)
-	snowflakeRe      = regexp.MustCompile(`^\d{15,22}$`)
-	messageLinkRe    = regexp.MustCompile(`^https?://(?:[\w-]+\.)?discord(?:app)?\.com/channels/(\d+|@me)/(\d+)/(\d+)/?$`)
+	snowflakeRe   = regexp.MustCompile(`^\d{15,22}$`)
+	messageLinkRe = regexp.MustCompile(`^https?://(?:[\w-]+\.)?discord(?:app)?\.com/channels/(\d+|@me)/(\d+)/(\d+)/?$`)
 )
 
 // token is a single whitespace-separated (or quoted) argument with its byte
@@ -79,7 +79,7 @@ func parsePrefixOptions(ctx *Context, cmd *Command, raw string) (*Options, error
 			if attachmentIdx < len(atts) {
 				a := atts[attachmentIdx]
 				attachmentIdx++
-				out.set(o.Name, &Value{Type: o.Type, raw: a.URL, id: a.ID, attachment: a, s: ctx.Session, guildID: ctx.GuildID()})
+				out.set(o.Name, &Value{Type: o.Type, raw: a.URL, id: a.ID, attachment: &a, client: ctx.Client, guildID: ctx.GuildID()})
 			} else if o.Required {
 				return out, &OptionError{Option: o, Err: ErrMissingOption}
 			}
@@ -114,7 +114,7 @@ func parsePrefixOptions(ctx *Context, cmd *Command, raw string) (*Options, error
 }
 
 func parseValue(ctx *Context, o *Option, text string) (*Value, error) {
-	v := &Value{Type: o.Type, raw: text, s: ctx.Session, guildID: ctx.GuildID()}
+	v := &Value{Type: o.Type, raw: text, client: ctx.Client, guildID: ctx.GuildID()}
 
 	if len(o.Choices) > 0 && hasChoices(o.Type) {
 		return parseChoice(v, o, text)
@@ -139,13 +139,13 @@ func parseValue(ctx *Context, o *Option, text string) (*Value, error) {
 			err = errors.New("expected yes/no, on/off or true/false")
 		}
 	case OptionUser:
-		v.id, v.kind = parseMention(text, userMentionRe), kindUser
+		v.id, v.kind = parseMention(text, discord.MentionTypeUser), kindUser
 		err = requireID(v.id, "expected a user mention or ID")
 	case OptionRole:
-		v.id, v.kind = parseMention(text, roleMentionRe), kindRole
+		v.id, v.kind = parseMention(text, discord.MentionTypeRole), kindRole
 		err = requireID(v.id, "expected a role mention or ID")
 	case OptionChannel:
-		v.id = parseMention(text, channelMentionRe)
+		v.id = parseMention(text, discord.MentionTypeChannel)
 		if err = requireID(v.id, "expected a channel mention or ID"); err == nil {
 			err = checkChannelType(o, v)
 		}
@@ -231,8 +231,8 @@ func checkChannelType(o *Option, v *Value) error {
 	return nil
 }
 
-func requireID(id, invalid string) error {
-	if id == "" {
+func requireID(id snowflake.ID, invalid string) error {
+	if id == 0 {
 		return errors.New(invalid)
 	}
 
@@ -240,20 +240,20 @@ func requireID(id, invalid string) error {
 }
 
 // parseMentionable resolves a user mention, role mention or bare ID.
-func parseMentionable(text string) (string, mentionKind) {
-	if m := userMentionRe.FindStringSubmatch(text); m != nil {
-		return m[1], kindUser
+func parseMentionable(text string) (snowflake.ID, mentionKind) {
+	if id, ok := matchMention(text, discord.MentionTypeUser); ok {
+		return id, kindUser
 	}
 
-	if m := roleMentionRe.FindStringSubmatch(text); m != nil {
-		return m[1], kindRole
+	if id, ok := matchMention(text, discord.MentionTypeRole); ok {
+		return id, kindRole
 	}
 
 	if snowflakeRe.MatchString(text) {
-		return text, kindUnknown
+		return parseID(text), kindUnknown
 	}
 
-	return "", kindUnknown
+	return 0, kindUnknown
 }
 
 func checkRange(o *Option, n float64) error {
@@ -295,29 +295,44 @@ func parseBool(text string) (bool, bool) {
 	return false, false
 }
 
-// parseMention extracts a snowflake from a mention matching re or a bare ID.
-func parseMention(text string, re *regexp.Regexp) string {
-	if m := re.FindStringSubmatch(text); m != nil {
-		return m[1]
+// 0 when text is neither a mention of type t nor a bare ID.
+func parseMention(text string, t discord.MentionType) snowflake.ID {
+	if id, ok := matchMention(text, t); ok {
+		return id
 	}
 
 	if snowflakeRe.MatchString(text) {
-		return text
+		return parseID(text)
 	}
 
-	return ""
+	return 0
+}
+
+// The patterns aren't anchored, so the match has to cover all of text.
+func matchMention(text string, t discord.MentionType) (snowflake.ID, bool) {
+	m := t.FindStringSubmatch(text)
+	if m == nil || m[0] != text {
+		return 0, false
+	}
+	return parseID(m[1]), true
+}
+
+// 0 for digits that overflow a snowflake.
+func parseID(s string) snowflake.ID {
+	id, _ := snowflake.Parse(s)
+	return id
 }
 
 // parseMessageRef extracts (channelID, messageID) from a message link or a
 // bare message ID (which is assumed to be in fallbackChannel).
-func parseMessageRef(text, fallbackChannel string) (channelID, messageID string, ok bool) {
+func parseMessageRef(text string, fallbackChannel snowflake.ID) (channelID, messageID snowflake.ID, ok bool) {
 	if m := messageLinkRe.FindStringSubmatch(text); m != nil {
-		return m[2], m[3], true
+		return parseID(m[2]), parseID(m[3]), true
 	}
 
 	if snowflakeRe.MatchString(text) {
-		return fallbackChannel, text, true
+		return fallbackChannel, parseID(text), true
 	}
 
-	return "", "", false
+	return 0, 0, false
 }

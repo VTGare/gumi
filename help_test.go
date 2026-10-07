@@ -3,7 +3,10 @@ package gumi
 import (
 	"strings"
 
-	"github.com/bwmarrin/discordgo"
+	"github.com/disgoorg/disgo/discord"
+	"github.com/disgoorg/snowflake/v2"
+
+	gt "github.com/VTGare/gumi/v2/gumitest"
 
 	"github.com/onsi/ginkgo/v2"
 	"github.com/onsi/gomega"
@@ -14,15 +17,17 @@ func helpTestRouter() *Router {
 }
 
 func helpMessageCtx(r *Router) *Context {
+	c, _ := gt.NewClient()
+	guildID := gt.GuildID
 	return &Context{
-		Session: &discordgo.Session{},
-		Router:  r,
-		Message: &discordgo.Message{
-			ID:        "m",
-			ChannelID: "c",
-			GuildID:   "g",
+		Client: c,
+		Router: r,
+		Message: &discord.Message{
+			ID:        1,
+			ChannelID: gt.ChannelID,
+			GuildID:   &guildID,
 			Content:   "bt!help",
-			Author:    &discordgo.User{ID: "u"},
+			Author:    discord.User{ID: 7},
 		},
 		Prefix:  "bt!",
 		Options: newOptions(),
@@ -30,14 +35,12 @@ func helpMessageCtx(r *Router) *Context {
 }
 
 func helpInteractionCtx(r *Router) *Context {
+	c, _ := gt.NewClient()
 	return &Context{
-		Session: &discordgo.Session{},
-		Router:  r,
-		Interaction: &discordgo.InteractionCreate{Interaction: &discordgo.Interaction{
-			GuildID: "g",
-			Member:  &discordgo.Member{User: &discordgo.User{ID: "u"}},
-		}},
-		Options: newOptions(),
+		Client:      c,
+		Router:      r,
+		Interaction: gt.Command(7, "help").Parse(),
+		Options:     newOptions(),
 	}
 }
 
@@ -88,28 +91,26 @@ func newTestView(r *Router, help *Command, cfg HelpConfig, prefix bool) *helpVie
 	cfg.Uncategorized = "Other"
 	cfg.Title = "Commands"
 	return &helpView{
-		r: r, s: &discordgo.Session{}, cfg: cfg, help: help,
-		guildID: "g", channelID: "c", userID: "u", prefix: prefix,
+		r: r, cfg: cfg, help: help,
+		guildID: gt.GuildID, channelID: gt.ChannelID, userID: 7, prefix: prefix,
 	}
 }
 
-func componentClick(userID, customID string, values ...string) *discordgo.InteractionCreate {
-	return &discordgo.InteractionCreate{Interaction: &discordgo.Interaction{
-		Type:    discordgo.InteractionMessageComponent,
-		GuildID: "g",
-		Member:  &discordgo.Member{User: &discordgo.User{ID: userID}},
-		Data:    discordgo.MessageComponentInteractionData{CustomID: customID, Values: values},
-	}}
+func componentClick(userID snowflake.ID, customID string, values ...string) discord.Interaction {
+	if values == nil {
+		return gt.Button(userID, customID).Parse()
+	}
+	return gt.Select(userID, customID, values...).Parse()
 }
 
-func selectMenu(resp *Response, row int) discordgo.SelectMenu {
-	return resp.Components[row].(discordgo.ActionsRow).Components[0].(discordgo.SelectMenu)
+func selectMenu(resp *Response, row int) discord.StringSelectMenuComponent {
+	return resp.Components[row].(discord.ActionRowComponent).Components[0].(discord.StringSelectMenuComponent)
 }
 
-func buttons(resp *Response, row int) []discordgo.Button {
-	var out []discordgo.Button
-	for _, c := range resp.Components[row].(discordgo.ActionsRow).Components {
-		out = append(out, c.(discordgo.Button))
+func buttons(resp *Response, row int) []discord.ButtonComponent {
+	var out []discord.ButtonComponent
+	for _, c := range resp.Components[row].(discord.ActionRowComponent).Components {
+		out = append(out, c.(discord.ButtonComponent))
 	}
 	return out
 }
@@ -130,11 +131,13 @@ var _ = ginkgo.Describe("Help syntax leads", func() {
 		gomega.Expect(v.syntaxLead(helpTestCommand())).To(gomega.Equal("/"))
 	})
 
-	ginkgo.It("falls back to slash without configured prefixes", func() {
-		r := New(Config{})
-		ctx := helpMessageCtx(r)
+	ginkgo.It("falls back to the mention, then slash, without configured prefixes", func() {
+		ctx := helpMessageCtx(New(Config{}))
 		ctx.Prefix = ""
+		gomega.Expect(viewFor(ctx).prefixLead()).To(gomega.Equal("@bot "))
 
+		ctx = helpMessageCtx(New(Config{DisableMentionPrefix: true}))
+		ctx.Prefix = ""
 		gomega.Expect(viewFor(ctx).prefixLead()).To(gomega.Equal("/"))
 	})
 })
@@ -204,12 +207,12 @@ var _ = ginkgo.Describe("Help overview", func() {
 
 		embed := resp.Embeds[0]
 		gomega.Expect(embed.Fields).To(gomega.HaveLen(4))
-		gomega.Expect(embed.Fields[0].Inline).To(gomega.BeTrue())
+		gomega.Expect(*embed.Fields[0].Inline).To(gomega.BeTrue())
 		gomega.Expect(embed.Description).To(gomega.ContainSubstring("`/help <command>`"))
 		gomega.Expect(embed.Description).To(gomega.ContainSubstring("`bt!`"))
 
 		menu := selectMenu(resp, 0)
-		gomega.Expect(menu.CustomID).To(gomega.Equal("rt:help:u:s:cat"))
+		gomega.Expect(menu.CustomID).To(gomega.Equal("rt:help:7:s:cat"))
 		gomega.Expect(menu.Options).To(gomega.HaveLen(4))
 
 		source := menu.Options[3]
@@ -229,15 +232,15 @@ var _ = ginkgo.Describe("Help category view", func() {
 			"`/sauce` — Finds sauce.\n**Find Sauce** — Finds sauce in a message. _(right-click a message, Apps)_"))
 
 		menu := selectMenu(resp, 0)
-		gomega.Expect(menu.CustomID).To(gomega.Equal("rt:help:u:s:cmd"))
+		gomega.Expect(menu.CustomID).To(gomega.Equal("rt:help:7:s:cmd"))
 		gomega.Expect(menu.Options[1].Value).To(gomega.Equal("1:Find Sauce"))
 
-		gomega.Expect(buttons(resp, 1)[0].CustomID).To(gomega.Equal("rt:help:u:s:home"))
+		gomega.Expect(buttons(resp, 1)[0].CustomID).To(gomega.Equal("rt:help:7:s:home"))
 	})
 
 	ginkgo.It("uses clickable mentions once commands are synced", func() {
 		r, help := helpRouter(HelpConfig{})
-		r.commandIDs[slashKey{ChatInput, "sauce"}] = "42"
+		r.commandIDs[slashKey{ChatInput, "sauce"}] = 42
 
 		resp := newTestView(r, help, HelpConfig{}, false).category("Source")
 		gomega.Expect(resp.Embeds[0].Description).To(gomega.HavePrefix("</sauce:42> — Finds sauce."))
@@ -245,7 +248,7 @@ var _ = ginkgo.Describe("Help category view", func() {
 
 	ginkgo.It("uses prefix syntax for prefix invocations", func() {
 		r, help := helpRouter(HelpConfig{})
-		r.commandIDs[slashKey{ChatInput, "sauce"}] = "42"
+		r.commandIDs[slashKey{ChatInput, "sauce"}] = 42
 
 		resp := newTestView(r, help, HelpConfig{}, true).category("Source")
 		gomega.Expect(resp.Embeds[0].Description).To(gomega.HavePrefix("`bt!sauce` — Finds sauce."))
@@ -275,7 +278,7 @@ var _ = ginkgo.Describe("Help detail view", func() {
 		row := buttons(resp, 0)
 		gomega.Expect(row).To(gomega.HaveLen(2))
 		gomega.Expect(row[0].Label).To(gomega.Equal("Back to Settings"))
-		gomega.Expect(row[0].CustomID).To(gomega.Equal("rt:help:u:s:cat:Settings"))
+		gomega.Expect(row[0].CustomID).To(gomega.Equal("rt:help:7:s:cat:Settings"))
 	})
 
 	ginkgo.It("leads with prefix syntax over prefix", func() {
@@ -288,7 +291,7 @@ var _ = ginkgo.Describe("Help detail view", func() {
 
 	ginkgo.It("renders examples as mentions once synced", func() {
 		r, help := helpRouter(HelpConfig{})
-		r.commandIDs[slashKey{ChatInput, "set"}] = "7"
+		r.commandIDs[slashKey{ChatInput, "set"}] = 7
 
 		embed := newTestView(r, help, HelpConfig{}, false).detail(r.Lookup("set")).Embeds[0]
 		gomega.Expect(embed.Fields[1].Value).To(gomega.Equal("</set:7> `pixiv false`"))
@@ -313,15 +316,15 @@ var _ = ginkgo.Describe("Help detail view", func() {
 })
 
 var _ = ginkgo.Describe("Help menu clicks", func() {
-	respond := func(r *Router, help *Command, i *discordgo.InteractionCreate) (*Response, bool) {
-		args := strings.TrimPrefix(i.MessageComponentData().CustomID, componentPrefix+help.Name+":")
-		ctx := &ComponentContext{Session: &discordgo.Session{}, Router: r, Command: help, Interaction: i, Args: strings.Split(args, ":")}
+	respond := func(r *Router, help *Command, i discord.Interaction) (*Response, bool) {
+		args := strings.TrimPrefix(componentCustomID(i), componentPrefix+help.Name+":")
+		ctx := &ComponentContext{Router: r, Command: help, Interaction: i, Args: strings.Split(args, ":")}
 		return helpComponent(ctx, HelpConfig{Name: "help", Title: "Commands", Uncategorized: "Other"}, help)
 	}
 
 	ginkgo.It("opens the picked category in place", func() {
 		r, help := helpRouter(HelpConfig{})
-		resp, private := respond(r, help, componentClick("u", "rt:help:u:s:cat", "Memes"))
+		resp, private := respond(r, help, componentClick(7, "rt:help:7:s:cat", "Memes"))
 
 		gomega.Expect(private).To(gomega.BeFalse())
 		gomega.Expect(resp.Embeds[0].Title).To(gomega.Equal("Memes"))
@@ -329,28 +332,28 @@ var _ = ginkgo.Describe("Help menu clicks", func() {
 
 	ginkgo.It("opens a picked context menu command", func() {
 		r, help := helpRouter(HelpConfig{})
-		resp, _ := respond(r, help, componentClick("u", "rt:help:u:s:cmd", "1:Find Sauce"))
+		resp, _ := respond(r, help, componentClick(7, "rt:help:7:s:cmd", "1:Find Sauce"))
 
 		gomega.Expect(resp.Embeds[0].Title).To(gomega.Equal("Find Sauce (message menu)"))
 	})
 
 	ginkgo.It("goes back to a category from a button", func() {
 		r, help := helpRouter(HelpConfig{})
-		resp, _ := respond(r, help, componentClick("u", "rt:help:u:p:cat:Settings"))
+		resp, _ := respond(r, help, componentClick(7, "rt:help:7:p:cat:Settings"))
 
 		gomega.Expect(resp.Embeds[0].Description).To(gomega.HavePrefix("`bt!set`"))
 	})
 
 	ginkgo.It("falls back to the overview for unknown targets", func() {
 		r, help := helpRouter(HelpConfig{})
-		resp, _ := respond(r, help, componentClick("u", "rt:help:u:s:cmd", "0:nope"))
+		resp, _ := respond(r, help, componentClick(7, "rt:help:7:s:cmd", "0:nope"))
 
 		gomega.Expect(resp.Embeds[0].Title).To(gomega.Equal("Commands"))
 	})
 
 	ginkgo.It("answers other users privately without touching the menu", func() {
 		r, help := helpRouter(HelpConfig{})
-		resp, private := respond(r, help, componentClick("someone-else", "rt:help:u:s:home"))
+		resp, private := respond(r, help, componentClick(8, "rt:help:7:s:home"))
 
 		gomega.Expect(private).To(gomega.BeTrue())
 		gomega.Expect(resp.Ephemeral).To(gomega.BeTrue())

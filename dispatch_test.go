@@ -1,7 +1,9 @@
 package gumi
 
 import (
-	"github.com/bwmarrin/discordgo"
+	"github.com/disgoorg/disgo/discord"
+
+	gt "github.com/VTGare/gumi/v2/gumitest"
 
 	"github.com/onsi/ginkgo/v2"
 	"github.com/onsi/gomega"
@@ -23,7 +25,8 @@ var _ = ginkgo.Describe("Prefix dispatch", func() {
 	}
 
 	send := func(content string) {
-		r.dispatchMessage(&discordgo.Session{}, &discordgo.MessageCreate{Message: &discordgo.Message{Content: content}})
+		c, _ := gt.NewClient()
+		r.dispatchMessage(c, discord.Message{Content: content})
 	}
 
 	ginkgo.BeforeEach(func() {

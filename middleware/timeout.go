@@ -4,7 +4,7 @@ import (
 	"context"
 	"time"
 
-	"github.com/VTGare/gumi"
+	"github.com/VTGare/gumi/v2"
 )
 
 // Timeout puts a deadline on ctx.Context(). Pass that context to I/O so

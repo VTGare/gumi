@@ -3,7 +3,10 @@ package gumi
 import (
 	"strings"
 
-	"github.com/bwmarrin/discordgo"
+	"github.com/disgoorg/disgo/bot"
+	"github.com/disgoorg/disgo/discord"
+	"github.com/disgoorg/disgo/events"
+	"github.com/disgoorg/snowflake/v2"
 )
 
 // ComponentHandler handles clicks, selects and modal submits on components
@@ -34,13 +37,15 @@ func ComponentID(cmd *Command, args ...string) string {
 
 // ComponentContext is a button click, select or modal submit.
 type ComponentContext struct {
-	Session     *discordgo.Session
-	Router      *Router
-	Command     *Command
-	Interaction *discordgo.InteractionCreate
+	Client  *bot.Client
+	Router  *Router
+	Command *Command
+	// A discord.ComponentInteraction or discord.ModalSubmitInteraction.
+	Interaction discord.Interaction
 	// Args are the custom ID's parts after the command name.
 	Args []string
 
+	responder events.InteractionResponderFunc
 	responded bool
 }
 
@@ -52,130 +57,133 @@ func (c *ComponentContext) Arg(i int) string {
 	return ""
 }
 
-func (c *ComponentContext) GuildID() string { return c.Interaction.GuildID }
+// 0 outside guilds.
+func (c *ComponentContext) GuildID() snowflake.ID { return idOrZero(c.Interaction.GuildID()) }
 
-func (c *ComponentContext) ChannelID() string { return c.Interaction.ChannelID }
+func (c *ComponentContext) ChannelID() snowflake.ID { return interactionChannelID(c.Interaction) }
 
 // UserID returns the ID of the user who clicked.
-func (c *ComponentContext) UserID() string {
-	if m := c.Interaction.Member; m != nil && m.User != nil {
-		return m.User.ID
+func (c *ComponentContext) UserID() snowflake.ID { return c.Interaction.User().ID }
+
+// nil in DMs.
+func (c *ComponentContext) Member() *discord.Member {
+	if m := c.Interaction.Member(); m != nil {
+		return &m.Member
 	}
-	if c.Interaction.User != nil {
-		return c.Interaction.User.ID
-	}
-	return ""
+	return nil
 }
 
 // Permissions are the user's channel permissions (all of them in DMs).
-func (c *ComponentContext) Permissions() int64 {
-	if c.Interaction.Member == nil {
-		return discordgo.PermissionAll
+func (c *ComponentContext) Permissions() discord.Permissions {
+	if m := c.Interaction.Member(); m != nil {
+		return m.Permissions
 	}
-	return c.Interaction.Member.Permissions
+	return discord.PermissionsAll
 }
 
 // IsModal reports whether this is a modal submit.
 func (c *ComponentContext) IsModal() bool {
-	return c.Interaction.Type == discordgo.InteractionModalSubmit
+	_, ok := c.Interaction.(discord.ModalSubmitInteraction)
+	return ok
 }
 
-// Values are a select menu's chosen values.
+// Entity selects give their IDs as strings.
 func (c *ComponentContext) Values() []string {
-	if c.IsModal() {
+	i, ok := c.Interaction.(discord.ComponentInteraction)
+	if !ok {
 		return nil
 	}
-	return c.Interaction.MessageComponentData().Values
+
+	switch d := i.Data.(type) {
+	case discord.StringSelectMenuInteractionData:
+		return d.Values
+	case discord.UserSelectMenuInteractionData:
+		return idStrings(d.Values)
+	case discord.RoleSelectMenuInteractionData:
+		return idStrings(d.Values)
+	case discord.MentionableSelectMenuInteractionData:
+		return idStrings(d.Values)
+	case discord.ChannelSelectMenuInteractionData:
+		return idStrings(d.Values)
+	}
+	return nil
+}
+
+func idStrings(ids []snowflake.ID) []string {
+	out := make([]string, len(ids))
+	for i, id := range ids {
+		out[i] = id.String()
+	}
+	return out
 }
 
 // ResolvedChannels are the channels picked in a channel select, by ID.
-func (c *ComponentContext) ResolvedChannels() map[string]*discordgo.Channel {
-	if c.IsModal() {
-		return nil
+func (c *ComponentContext) ResolvedChannels() map[snowflake.ID]discord.ResolvedChannel {
+	if i, ok := c.Interaction.(discord.ComponentInteraction); ok {
+		if d, ok := i.Data.(discord.ChannelSelectMenuInteractionData); ok {
+			return d.Resolved.Channels
+		}
 	}
-	return c.Interaction.MessageComponentData().Resolved.Channels
+	return nil
 }
 
 // TextInput is a modal text input's submitted value, or "".
 func (c *ComponentContext) TextInput(customID string) string {
-	if !c.IsModal() {
-		return ""
+	if i, ok := c.Interaction.(discord.ModalSubmitInteraction); ok {
+		return i.Data.Text(customID)
 	}
-
-	for _, row := range c.Interaction.ModalSubmitData().Components {
-		r, ok := row.(*discordgo.ActionsRow)
-		if !ok {
-			continue
-		}
-
-		for _, comp := range r.Components {
-			if in, ok := comp.(*discordgo.TextInput); ok && in.CustomID == customID {
-				return in.Value
-			}
-		}
-	}
-
 	return ""
 }
 
 // Update edits the message the component is on.
 func (c *ComponentContext) Update(r *Response) error {
-	return c.respond(discordgo.InteractionResponseUpdateMessage, &discordgo.InteractionResponseData{
-		Content:         r.Content,
-		Embeds:          r.Embeds,
-		Components:      r.Components,
-		AllowedMentions: r.AllowedMentions,
-	})
+	return c.respond(discord.InteractionResponseTypeUpdateMessage, r.messageUpdate())
 }
 
 // Reply sends a new message; set Ephemeral for an invoker-only one.
 func (c *ComponentContext) Reply(r *Response) error {
-	return c.respond(discordgo.InteractionResponseChannelMessageWithSource, r.interactionData(false))
+	return c.respond(discord.InteractionResponseTypeCreateMessage, r.messageCreate(false))
 }
 
 // Modal opens a modal whose submit routes back with the given custom ID.
-func (c *ComponentContext) Modal(customID, title string, inputs ...discordgo.TextInput) error {
-	rows := make([]discordgo.MessageComponent, 0, len(inputs))
-	for _, in := range inputs {
-		rows = append(rows, discordgo.ActionsRow{Components: []discordgo.MessageComponent{in}})
-	}
-
-	return c.respond(discordgo.InteractionResponseModal, &discordgo.InteractionResponseData{
+func (c *ComponentContext) Modal(customID, title string, components ...discord.LayoutComponent) error {
+	return c.respond(discord.InteractionResponseTypeModal, discord.ModalCreate{
 		CustomID:   customID,
 		Title:      title,
-		Components: rows,
+		Components: components,
 	})
 }
 
-func (c *ComponentContext) respond(t discordgo.InteractionResponseType, data *discordgo.InteractionResponseData) error {
+func (c *ComponentContext) respond(t discord.InteractionResponseType, data discord.InteractionResponseData) error {
 	if c.responded {
 		return ErrAlreadyResponded
 	}
 
-	err := c.Session.InteractionRespond(c.Interaction.Interaction, &discordgo.InteractionResponse{Type: t, Data: data})
+	err := c.responder(t, data)
 	if err == nil {
 		c.responded = true
 	}
-
 	return err
 }
 
-func componentCustomID(i *discordgo.InteractionCreate) string {
-	if i.Type == discordgo.InteractionModalSubmit {
-		return i.ModalSubmitData().CustomID
+func componentCustomID(i discord.Interaction) string {
+	switch i := i.(type) {
+	case discord.ModalSubmitInteraction:
+		return i.Data.CustomID
+	case discord.ComponentInteraction:
+		return i.Data.CustomID()
 	}
-	return i.MessageComponentData().CustomID
+	return ""
 }
 
 // handleComponent routes a component or modal submit to the root command
 // named in its custom ID. Components skip middleware, so panics are
 // recovered here and errors answered privately.
-func (r *Router) handleComponent(s *discordgo.Session, i *discordgo.InteractionCreate) {
+func (r *Router) handleComponent(c *bot.Client, i discord.Interaction, respond events.InteractionResponderFunc) {
 	rest, ok := strings.CutPrefix(componentCustomID(i), componentPrefix)
 	if !ok {
 		return
 	}
-
 	name, args, _ := strings.Cut(rest, ":")
 
 	var cmd *Command
@@ -189,13 +197,12 @@ func (r *Router) handleComponent(s *discordgo.Session, i *discordgo.InteractionC
 		return
 	}
 
-	ctx := &ComponentContext{Session: s, Router: r, Command: cmd, Interaction: i}
+	ctx := &ComponentContext{Client: c, Router: r, Command: cmd, Interaction: i, responder: respond}
 	if args != "" {
 		ctx.Args = strings.Split(args, ":")
 	}
 
 	defer func() { _ = recover() }()
-
 	if err := cmd.Components(ctx); err != nil && !ctx.responded {
 		msg, ok := UserMessageOf(err)
 		if !ok {

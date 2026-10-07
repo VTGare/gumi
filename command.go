@@ -8,7 +8,9 @@ import (
 	"strings"
 	"unicode/utf8"
 
-	"github.com/bwmarrin/discordgo"
+	"github.com/disgoorg/disgo/discord"
+	"github.com/disgoorg/omit"
+	"github.com/disgoorg/snowflake/v2"
 )
 
 // CommandType mirrors Discord application command types.
@@ -36,23 +38,11 @@ func (t CommandType) String() string {
 	return "unknown"
 }
 
-func (t CommandType) discord() discordgo.ApplicationCommandType {
+func commandTypeOf(t discord.ApplicationCommandType) CommandType {
 	switch t {
-	case MessageContext:
-		return discordgo.MessageApplicationCommand
-	case UserContext:
-		return discordgo.UserApplicationCommand
-	default:
-		return discordgo.ChatApplicationCommand
-	}
-}
-
-// commandTypeOf is the inverse of CommandType.discord.
-func commandTypeOf(t discordgo.ApplicationCommandType) CommandType {
-	switch t {
-	case discordgo.MessageApplicationCommand:
+	case discord.ApplicationCommandTypeMessage:
 		return MessageContext
-	case discordgo.UserApplicationCommand:
+	case discord.ApplicationCommandTypeUser:
 		return UserContext
 	default:
 		return ChatInput
@@ -110,12 +100,12 @@ type Command struct {
 	NSFW bool
 	// Hides the slash command by default (admins can override). Also not a
 	// runtime check; use HasPermissions for that.
-	DefaultMemberPermissions *int64
+	DefaultMemberPermissions *discord.Permissions
 	// Where the slash command shows up; empty means Discord's default.
-	Contexts         []discordgo.InteractionContextType
-	IntegrationTypes []discordgo.ApplicationIntegrationType
+	Contexts         []discord.InteractionContextType
+	IntegrationTypes []discord.ApplicationIntegrationType
 	// Register the slash command only here instead of globally.
-	GuildIDs      []string
+	GuildIDs      []snowflake.ID
 	DisableSlash  bool
 	DisablePrefix bool
 	Hidden        bool
@@ -358,54 +348,61 @@ func (c *Command) validateGroup(depth int) error {
 	return nil
 }
 
-func (c *Command) applicationCommand() *discordgo.ApplicationCommand {
-	ac := &discordgo.ApplicationCommand{
-		Name:                     c.Name,
-		Type:                     c.Type.discord(),
-		DefaultMemberPermissions: c.DefaultMemberPermissions,
+func (c *Command) applicationCommand() discord.ApplicationCommandCreate {
+	var perms omit.Omit[*discord.Permissions]
+	if c.DefaultMemberPermissions != nil {
+		perms = omit.NewPtr(*c.DefaultMemberPermissions)
 	}
-	if c.Type == ChatInput {
-		ac.Description = c.Description
-		ac.Options = c.discordOptions()
-	}
+
+	var nsfw *bool
 	if c.NSFW {
-		nsfw := true
-		ac.NSFW = &nsfw
+		nsfw = omit.Ptr(true)
 	}
 
-	if len(c.Contexts) > 0 {
-		ctxs := slices.Clone(c.Contexts)
-		ac.Contexts = &ctxs
+	contexts := slices.Clone(c.Contexts)
+	types := slices.Clone(c.IntegrationTypes)
+
+	switch c.Type {
+	case MessageContext:
+		return discord.MessageCommandCreate{
+			Name: c.Name, DefaultMemberPermissions: perms, NSFW: nsfw,
+			Contexts: contexts, IntegrationTypes: types,
+		}
+	case UserContext:
+		return discord.UserCommandCreate{
+			Name: c.Name, DefaultMemberPermissions: perms, NSFW: nsfw,
+			Contexts: contexts, IntegrationTypes: types,
+		}
 	}
 
-	if len(c.IntegrationTypes) > 0 {
-		types := slices.Clone(c.IntegrationTypes)
-		ac.IntegrationTypes = &types
+	return discord.SlashCommandCreate{
+		Name: c.Name, Description: c.Description, Options: c.discordOptions(),
+		DefaultMemberPermissions: perms, NSFW: nsfw,
+		Contexts: contexts, IntegrationTypes: types,
 	}
-
-	return ac
 }
 
-func (c *Command) discordOptions() []*discordgo.ApplicationCommandOption {
+func (c *Command) discordOptions() []discord.ApplicationCommandOption {
 	if c.IsGroup() {
-		opts := make([]*discordgo.ApplicationCommandOption, 0, len(c.Subcommands))
+		opts := make([]discord.ApplicationCommandOption, 0, len(c.Subcommands))
 		for _, sub := range c.Subcommands {
-			t := discordgo.ApplicationCommandOptionSubCommand
 			if sub.IsGroup() {
-				t = discordgo.ApplicationCommandOptionSubCommandGroup
+				group := discord.ApplicationCommandOptionSubCommandGroup{Name: sub.Name, Description: sub.Description}
+				for _, o := range sub.discordOptions() {
+					group.Options = append(group.Options, o.(discord.ApplicationCommandOptionSubCommand))
+				}
+				opts = append(opts, group)
+				continue
 			}
-			opts = append(opts, &discordgo.ApplicationCommandOption{
-				Type:        t,
-				Name:        sub.Name,
-				Description: sub.Description,
-				Options:     sub.discordOptions(),
+			opts = append(opts, discord.ApplicationCommandOptionSubCommand{
+				Name: sub.Name, Description: sub.Description, Options: sub.discordOptions(),
 			})
 		}
 
 		return opts
 	}
 
-	opts := make([]*discordgo.ApplicationCommandOption, 0, len(c.Options))
+	opts := make([]discord.ApplicationCommandOption, 0, len(c.Options))
 	for _, o := range c.Options {
 		opts = append(opts, o.toDiscord())
 	}

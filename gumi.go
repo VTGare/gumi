@@ -12,18 +12,22 @@ import (
 	"strings"
 	"sync"
 
-	"github.com/bwmarrin/discordgo"
+	"github.com/disgoorg/disgo/bot"
+	"github.com/disgoorg/disgo/discord"
+	"github.com/disgoorg/disgo/events"
+	"github.com/disgoorg/snowflake/v2"
 )
 
 // PrefixResolver returns the prefixes accepted in the given guild/channel.
-type PrefixResolver func(s *discordgo.Session, guildID, channelID string) []string
+// guildID is 0 in DMs.
+type PrefixResolver func(c *bot.Client, guildID, channelID snowflake.ID) []string
 
 // ErrorHandler receives every error returned from the command pipeline.
 type ErrorHandler func(ctx *Context, err error)
 
 // FallbackHandler receives messages (from non-bot users) that were not
 // dispatched as a command.
-type FallbackHandler func(s *discordgo.Session, m *discordgo.MessageCreate)
+type FallbackHandler func(e *events.MessageCreate)
 
 type Config struct {
 	// Prefixes accepted everywhere. Ignored if PrefixResolver is set.
@@ -43,12 +47,12 @@ type Config struct {
 
 	// DevGuildID registers every slash command to this guild instead of
 	// globally (instant propagation, useful for development).
-	DevGuildID string
+	DevGuildID snowflake.ID
 
-	// ApplicationID used for Sync. Fetched from the API if empty.
-	ApplicationID string
+	// For Sync. Defaults to the client's.
+	ApplicationID snowflake.ID
 
-	OwnerIDs []string
+	OwnerIDs []snowflake.ID
 
 	// ErrorHandler replaces the default error handler.
 	ErrorHandler ErrorHandler
@@ -61,7 +65,7 @@ type Config struct {
 	Fallback FallbackHandler
 
 	// AllowedMentions applied to prefix replies that don't set their own.
-	AllowedMentions *discordgo.MessageAllowedMentions
+	AllowedMentions *discord.AllowedMentions
 
 	// DisableReplyReference stops prefix replies from quoting the invoking
 	// message.
@@ -85,9 +89,9 @@ type Router struct {
 	slashIndex  map[slashKey]*Command
 	middleware  []Middleware
 	checks      []Check
-	owners      map[string]struct{}
+	owners      map[snowflake.ID]struct{}
 	// commandIDs are the synced application command IDs, for mentions.
-	commandIDs map[slashKey]string
+	commandIDs map[slashKey]snowflake.ID
 }
 
 func New(cfg Config) *Router {
@@ -95,8 +99,8 @@ func New(cfg Config) *Router {
 		cfg:         cfg,
 		prefixIndex: make(map[string]*Command),
 		slashIndex:  make(map[slashKey]*Command),
-		owners:      make(map[string]struct{}),
-		commandIDs:  make(map[slashKey]string),
+		owners:      make(map[snowflake.ID]struct{}),
+		commandIDs:  make(map[slashKey]snowflake.ID),
 	}
 	for _, id := range cfg.OwnerIDs {
 		r.owners[id] = struct{}{}
@@ -106,7 +110,7 @@ func New(cfg Config) *Router {
 
 func (r *Router) Config() Config { return r.cfg }
 
-func (r *Router) IsOwner(userID string) bool {
+func (r *Router) IsOwner(userID snowflake.ID) bool {
 	_, ok := r.owners[userID]
 	return ok
 }
@@ -213,9 +217,9 @@ func (r *Router) Lookup(path ...string) *Command {
 	return cmd
 }
 
-func (r *Router) Prefixes(s *discordgo.Session, guildID, channelID string) []string {
+func (r *Router) Prefixes(c *bot.Client, guildID, channelID snowflake.ID) []string {
 	if r.cfg.PrefixResolver != nil {
-		return r.cfg.PrefixResolver(s, guildID, channelID)
+		return r.cfg.PrefixResolver(c, guildID, channelID)
 	}
 
 	return r.cfg.Prefixes
@@ -223,40 +227,50 @@ func (r *Router) Prefixes(s *discordgo.Session, guildID, channelID string) []str
 
 // mentionPrefix is how mention invocation ("@Bot ") reads, or "" when it
 // is off or the bot user is unknown.
-func (r *Router) mentionPrefix(s *discordgo.Session) string {
-	if r.cfg.DisableMentionPrefix || s == nil || s.State == nil || s.State.User == nil {
+func (r *Router) mentionPrefix(c *bot.Client) string {
+	if r.cfg.DisableMentionPrefix {
 		return ""
 	}
 
-	return "@" + s.State.User.Username + " "
+	self, ok := selfUser(c)
+	if !ok {
+		return ""
+	}
+
+	return "@" + self.Username + " "
 }
 
-// Bind hooks the router into the session; the result unbinds it.
-func (r *Router) Bind(s *discordgo.Session) func() {
-	rmMsg := s.AddHandler(r.HandleMessage)
-	rmInt := s.AddHandler(r.HandleInteraction)
-	return func() {
-		rmMsg()
-		rmInt()
+// The returned function removes the router again.
+func (r *Router) Bind(c *bot.Client) func() {
+	c.AddEventListeners(r)
+	return func() { c.RemoveEventListeners(r) }
+}
+
+func (r *Router) OnEvent(event bot.Event) {
+	switch e := event.(type) {
+	case *events.MessageCreate:
+		r.HandleMessage(e)
+	case *events.InteractionCreate:
+		r.HandleInteraction(e)
 	}
 }
 
-func (r *Router) HandleMessage(s *discordgo.Session, m *discordgo.MessageCreate) {
-	if m == nil || m.Message == nil || m.Author == nil || m.Author.Bot {
+func (r *Router) HandleMessage(e *events.MessageCreate) {
+	if e == nil || e.GenericMessage == nil || e.Message.Author.Bot {
 		return
 	}
-	if !r.dispatchMessage(s, m) && r.cfg.Fallback != nil {
-		r.cfg.Fallback(s, m)
+	if !r.dispatchMessage(e.Client(), e.Message) && r.cfg.Fallback != nil {
+		r.cfg.Fallback(e)
 	}
 }
 
 // dispatchMessage returns true if the message was handled as a command.
-func (r *Router) dispatchMessage(s *discordgo.Session, m *discordgo.MessageCreate) bool {
+func (r *Router) dispatchMessage(c *bot.Client, m discord.Message) bool {
 	if r.cfg.DisablePrefixCommands {
 		return false
 	}
 
-	prefix, rest, ok := r.matchPrefix(s, m)
+	prefix, rest, ok := r.matchPrefix(c, m)
 	if !ok {
 		return false
 	}
@@ -306,19 +320,19 @@ func (r *Router) dispatchMessage(s *discordgo.Session, m *discordgo.MessageCreat
 		args = rest[toks[i].start:]
 	}
 
-	ctx := newContext(r, s, cmd)
+	ctx := newContext(r, c, cmd)
 	ctx.Source = SourceMessage
 	ctx.Prefix = prefix
-	ctx.Message = m.Message
+	ctx.Message = &m
 
 	if parseErr == nil {
 		switch cmd.Type {
 		case ChatInput:
 			ctx.Options, parseErr = parsePrefixOptions(ctx, cmd, args)
 		case MessageContext:
-			parseErr = resolveMessageTarget(ctx, m, args)
+			parseErr = resolveMessageTarget(ctx, args)
 		case UserContext:
-			parseErr = resolveUserTarget(ctx, m, args)
+			parseErr = resolveUserTarget(ctx, args)
 		}
 	}
 
@@ -326,20 +340,22 @@ func (r *Router) dispatchMessage(s *discordgo.Session, m *discordgo.MessageCreat
 	return true
 }
 
-func (r *Router) matchPrefix(s *discordgo.Session, m *discordgo.MessageCreate) (prefix, rest string, ok bool) {
+func (r *Router) matchPrefix(c *bot.Client, m discord.Message) (prefix, rest string, ok bool) {
 	content := m.Content
 
-	if !r.cfg.DisableMentionPrefix && s.State != nil && s.State.User != nil {
-		id := s.State.User.ID
-		for _, p := range []string{"<@" + id + ">", "<@!" + id + ">"} {
-			if strings.HasPrefix(content, p) {
-				return p, content[len(p):], true
+	if !r.cfg.DisableMentionPrefix {
+		if self, ok := selfUser(c); ok {
+			id := self.ID.String()
+			for _, p := range []string{"<@" + id + ">", "<@!" + id + ">"} {
+				if strings.HasPrefix(content, p) {
+					return p, content[len(p):], true
+				}
 			}
 		}
 	}
 
 	// The longest match wins, so "bt!" beats "bt" for "bt!help".
-	for _, p := range r.Prefixes(s, m.GuildID, m.ChannelID) {
+	for _, p := range r.Prefixes(c, idOrZero(m.GuildID), m.ChannelID) {
 		if p != "" && len(p) > len(prefix) && len(content) >= len(p) && strings.EqualFold(content[:len(p)], p) {
 			prefix = p
 		}
@@ -352,7 +368,8 @@ func (r *Router) matchPrefix(s *discordgo.Session, m *discordgo.MessageCreate) (
 	return prefix, content[len(prefix):], true
 }
 
-func resolveMessageTarget(ctx *Context, m *discordgo.MessageCreate, args string) error {
+func resolveMessageTarget(ctx *Context, args string) error {
+	m := ctx.Message
 	if m.ReferencedMessage != nil {
 		ctx.TargetMessage = m.ReferencedMessage
 		return nil
@@ -362,7 +379,7 @@ func resolveMessageTarget(ctx *Context, m *discordgo.MessageCreate, args string)
 		if !ok {
 			return NewUserError("Reply to a message or provide a message link to use this command.")
 		}
-		msg, err := ctx.Session.ChannelMessage(channelID, messageID)
+		msg, err := ctx.Client.Rest.GetMessage(channelID, messageID)
 		if err != nil {
 			return WrapUserError("I couldn't find that message.", err)
 		}
@@ -372,23 +389,25 @@ func resolveMessageTarget(ctx *Context, m *discordgo.MessageCreate, args string)
 	return NewUserError("Reply to a message or provide a message link to use this command.")
 }
 
-func resolveUserTarget(ctx *Context, m *discordgo.MessageCreate, args string) error {
+func resolveUserTarget(ctx *Context, args string) error {
+	m := ctx.Message
 	toks := tokenize(args)
 	if len(toks) == 0 {
-		ctx.TargetUser = m.Author
+		author := m.Author
+		ctx.TargetUser = &author
 		ctx.TargetMember = ctx.Member()
 		return nil
 	}
 
-	id := parseMention(toks[0].text, userMentionRe)
-	if id == "" {
+	id := parseMention(toks[0].text, discord.MentionTypeUser)
+	if id == 0 {
 		return NewUserError("Expected a user mention or ID.")
 	}
-	v := &Value{Type: OptionUser, id: id, kind: kindUser, s: ctx.Session, guildID: m.GuildID}
-	if m.GuildID != "" {
+	v := &Value{Type: OptionUser, id: id, kind: kindUser, client: ctx.Client, guildID: ctx.GuildID()}
+	if ctx.GuildID() != 0 {
 		if member, err := v.Member(); err == nil {
 			ctx.TargetMember = member
-			ctx.TargetUser = member.User
+			ctx.TargetUser = &member.User
 			return nil
 		}
 	}
@@ -402,27 +421,56 @@ func resolveUserTarget(ctx *Context, m *discordgo.MessageCreate, args string) er
 
 // HandleInteraction runs application commands, their autocomplete, and
 // the components and modals built with ComponentID. It ignores everything
-// else, so it can
-// share a session with your own component and modal handlers.
-func (r *Router) HandleInteraction(s *discordgo.Session, i *discordgo.InteractionCreate) {
-	if i == nil || i.Interaction == nil {
+// else, so it can share a client with your own component and modal
+// handlers.
+func (r *Router) HandleInteraction(e *events.InteractionCreate) {
+	if e == nil || e.Interaction == nil {
 		return
 	}
-	switch {
-	case i.Type == discordgo.InteractionMessageComponent || i.Type == discordgo.InteractionModalSubmit:
-		r.handleComponent(s, i)
-	case i.Type == discordgo.InteractionApplicationCommand && !r.cfg.DisableSlashCommands:
-		r.handleCommand(s, i)
-	case i.Type == discordgo.InteractionApplicationCommandAutocomplete && !r.cfg.DisableSlashCommands:
-		r.handleAutocomplete(s, i)
+	switch i := e.Interaction.(type) {
+	case discord.ComponentInteraction, discord.ModalSubmitInteraction:
+		r.handleComponent(e.Client(), i, e.Respond)
+	case discord.ApplicationCommandInteraction:
+		if !r.cfg.DisableSlashCommands {
+			r.handleCommand(e.Client(), i, e.Respond)
+		}
+	case discord.AutocompleteInteraction:
+		if !r.cfg.DisableSlashCommands {
+			r.handleAutocomplete(e.Client(), i, e.Respond)
+		}
 	}
 }
 
-func (r *Router) handleCommand(s *discordgo.Session, i *discordgo.InteractionCreate) {
-	data := i.ApplicationCommandData()
+func resolvePath(cmd *Command, path []string) (*Command, error) {
+	for i := 0; cmd.IsGroup(); i++ {
+		if i >= len(path) {
+			return cmd, &SubcommandError{Command: cmd}
+		}
+		sub := cmd.Subcommand(path[i])
+		if sub == nil {
+			return cmd, &SubcommandError{Command: cmd, Given: path[i]}
+		}
+		cmd = sub
+	}
+	return cmd, nil
+}
+
+func subcommandPath(group, sub *string) []string {
+	var path []string
+	if group != nil {
+		path = append(path, *group)
+	}
+	if sub != nil {
+		path = append(path, *sub)
+	}
+	return path
+}
+
+func (r *Router) handleCommand(c *bot.Client, i discord.ApplicationCommandInteraction, respond events.InteractionResponderFunc) {
+	data := i.Data
 
 	r.mu.RLock()
-	cmd := r.slashIndex[slashKey{commandTypeOf(data.CommandType), data.Name}]
+	cmd := r.slashIndex[slashKey{commandTypeOf(data.Type()), data.CommandName()}]
 	r.mu.RUnlock()
 
 	if cmd == nil {
@@ -430,45 +478,34 @@ func (r *Router) handleCommand(s *discordgo.Session, i *discordgo.InteractionCre
 	}
 
 	var parseErr error
-	opts := data.Options
-	for cmd.IsGroup() {
-		if len(opts) == 0 {
-			parseErr = &SubcommandError{Command: cmd}
-			break
-		}
-		sub := cmd.Subcommand(opts[0].Name)
-		if sub == nil {
-			parseErr = &SubcommandError{Command: cmd, Given: opts[0].Name}
-			break
-		}
-		cmd = sub
-		opts = opts[0].Options
+	slash, isSlash := data.(discord.SlashCommandInteractionData)
+	if isSlash {
+		cmd, parseErr = resolvePath(cmd, subcommandPath(slash.SubCommandGroupName, slash.SubCommandName))
 	}
 
-	ctx := newContext(r, s, cmd)
+	ctx := newContext(r, c, cmd)
 	ctx.Source = SourceInteraction
 	ctx.Interaction = i
+	ctx.responder = respond
 
 	if parseErr == nil {
-		switch cmd.Type {
-		case ChatInput:
-			ctx.Options = optionsFromInteraction(s, i.GuildID, opts, data.Resolved)
-		case MessageContext:
-			if data.Resolved != nil {
-				ctx.TargetMessage = data.Resolved.Messages[data.TargetID]
-			}
-			if ctx.TargetMessage == nil {
+		switch d := data.(type) {
+		case discord.SlashCommandInteractionData:
+			ctx.Options = optionsFromSlash(c, ctx.GuildID(), d.Options, &d.Resolved)
+		case discord.MessageCommandInteractionData:
+			if msg, ok := d.Resolved.Messages[d.TargetID()]; ok {
+				ctx.TargetMessage = &msg
+			} else {
 				parseErr = ErrMissingTarget
 			}
-		case UserContext:
-			if data.Resolved != nil {
-				ctx.TargetUser = data.Resolved.Users[data.TargetID]
-				ctx.TargetMember = data.Resolved.Members[data.TargetID]
-				if ctx.TargetMember != nil && ctx.TargetMember.User == nil {
-					ctx.TargetMember.User = ctx.TargetUser
+		case discord.UserCommandInteractionData:
+			if user, ok := d.Resolved.Users[d.TargetID()]; ok {
+				ctx.TargetUser = &user
+				if member, ok := d.Resolved.Members[d.TargetID()]; ok {
+					member.User = user
+					ctx.TargetMember = &member.Member
 				}
-			}
-			if ctx.TargetUser == nil {
+			} else {
 				parseErr = ErrMissingTarget
 			}
 		}
@@ -562,8 +599,8 @@ func DefaultErrorHandler(ctx *Context, err error) {
 
 // ApplicationCommands builds the Discord definitions, split into global and
 // per-guild commands. DevGuildID is not applied here; see Sync.
-func (r *Router) ApplicationCommands() (global []*discordgo.ApplicationCommand, byGuild map[string][]*discordgo.ApplicationCommand) {
-	byGuild = make(map[string][]*discordgo.ApplicationCommand)
+func (r *Router) ApplicationCommands() (global []discord.ApplicationCommandCreate, byGuild map[snowflake.ID][]discord.ApplicationCommandCreate) {
+	byGuild = make(map[snowflake.ID][]discord.ApplicationCommandCreate)
 	for _, c := range r.Commands() {
 		if c.DisableSlash {
 			continue
@@ -582,22 +619,17 @@ func (r *Router) ApplicationCommands() (global []*discordgo.ApplicationCommand, 
 
 // Sync bulk-overwrites the application commands. With DevGuildID set,
 // everything lands in that guild instead (globals are left alone).
-// Call it after the session is open.
-func (r *Router) Sync(s *discordgo.Session) error {
+func (r *Router) Sync(c *bot.Client) error {
 	if r.cfg.DisableSlashCommands {
 		return nil
 	}
-	appID, err := r.applicationID(s)
-	if err != nil {
-		return fmt.Errorf("gumi: resolve application id: %w", err)
-	}
+	appID := r.applicationID(c)
 
 	global, byGuild := r.ApplicationCommands()
-	if r.cfg.DevGuildID != "" {
+	if r.cfg.DevGuildID != 0 {
 		byGuild[r.cfg.DevGuildID] = dedupeCommands(append(byGuild[r.cfg.DevGuildID], global...))
-		global = nil
 	} else {
-		synced, err := s.ApplicationCommandBulkOverwrite(appID, "", global)
+		synced, err := c.Rest.SetGlobalCommands(appID, nonNil(global))
 		if err != nil {
 			return fmt.Errorf("gumi: sync global commands: %w", err)
 		}
@@ -605,7 +637,7 @@ func (r *Router) Sync(s *discordgo.Session) error {
 	}
 
 	for gid, cmds := range byGuild {
-		synced, err := s.ApplicationCommandBulkOverwrite(appID, gid, cmds)
+		synced, err := c.Rest.SetGuildCommands(appID, gid, nonNil(cmds))
 		if err != nil {
 			return fmt.Errorf("gumi: sync commands for guild %s: %w", gid, err)
 		}
@@ -618,11 +650,11 @@ func (r *Router) Sync(s *discordgo.Session) error {
 	return nil
 }
 
-func (r *Router) storeCommandIDs(cmds []*discordgo.ApplicationCommand) {
+func (r *Router) storeCommandIDs(cmds []discord.ApplicationCommand) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	for _, c := range cmds {
-		r.commandIDs[slashKey{commandTypeOf(c.Type), c.Name}] = c.ID
+		r.commandIDs[slashKey{commandTypeOf(c.Type()), c.Name()}] = c.ID()
 	}
 }
 
@@ -635,43 +667,48 @@ func (r *Router) Mention(c *Command) string {
 	r.mu.RLock()
 	id := r.commandIDs[slashKey{ChatInput, c.Root().Name}]
 	r.mu.RUnlock()
-	if id == "" {
+	if id == 0 {
 		return ""
 	}
-	return "</" + c.QualifiedName() + ":" + id + ">"
+	return discord.SlashCommandMention(id, c.QualifiedName())
 }
 
-// ClearCommands wipes global (guildID == "") or guild commands.
-func (r *Router) ClearCommands(s *discordgo.Session, guildID string) error {
-	appID, err := r.applicationID(s)
-	if err != nil {
-		return err
+// ClearCommands wipes global (guildID 0) or guild commands.
+func (r *Router) ClearCommands(c *bot.Client, guildID snowflake.ID) error {
+	appID := r.applicationID(c)
+	var err error
+	if guildID == 0 {
+		_, err = c.Rest.SetGlobalCommands(appID, []discord.ApplicationCommandCreate{})
+	} else {
+		_, err = c.Rest.SetGuildCommands(appID, guildID, []discord.ApplicationCommandCreate{})
 	}
-
-	_, err = s.ApplicationCommandBulkOverwrite(appID, guildID, []*discordgo.ApplicationCommand{})
 	return err
 }
 
-func (r *Router) applicationID(s *discordgo.Session) (string, error) {
-	if r.cfg.ApplicationID != "" {
-		return r.cfg.ApplicationID, nil
+func (r *Router) applicationID(c *bot.Client) snowflake.ID {
+	if r.cfg.ApplicationID != 0 {
+		return r.cfg.ApplicationID
 	}
-	app, err := s.Application("@me")
-	if err != nil {
-		return "", err
-	}
-	return app.ID, nil
+	return c.ApplicationID
 }
 
-func dedupeCommands(cmds []*discordgo.ApplicationCommand) []*discordgo.ApplicationCommand {
+// Discord expects an empty overwrite as [], not null.
+func nonNil(cmds []discord.ApplicationCommandCreate) []discord.ApplicationCommandCreate {
+	if cmds == nil {
+		return []discord.ApplicationCommandCreate{}
+	}
+	return cmds
+}
+
+func dedupeCommands(cmds []discord.ApplicationCommandCreate) []discord.ApplicationCommandCreate {
 	type key struct {
-		t    discordgo.ApplicationCommandType
+		t    discord.ApplicationCommandType
 		name string
 	}
 	seen := make(map[key]bool)
 	out := cmds[:0]
 	for _, c := range cmds {
-		k := key{c.Type, c.Name}
+		k := key{c.Type(), c.CommandName()}
 		if seen[k] {
 			continue
 		}
@@ -679,4 +716,18 @@ func dedupeCommands(cmds []*discordgo.ApplicationCommand) []*discordgo.Applicati
 		out = append(out, c)
 	}
 	return out
+}
+
+func selfUser(c *bot.Client) (discord.OAuth2User, bool) {
+	if c == nil || c.Caches == nil {
+		return discord.OAuth2User{}, false
+	}
+	return c.Caches.SelfUser()
+}
+
+func idOrZero(id *snowflake.ID) snowflake.ID {
+	if id == nil {
+		return 0
+	}
+	return *id
 }

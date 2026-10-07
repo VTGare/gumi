@@ -13,7 +13,7 @@ import (
 	"log/slog"
 	"time"
 
-	"github.com/VTGare/gumi"
+	"github.com/VTGare/gumi/v2"
 )
 
 // Logging records every invocation: Info for success and user rejections
@@ -32,9 +32,9 @@ func Logging(logger *slog.Logger) gumi.Middleware {
 			attrs := []slog.Attr{
 				slog.String("command", ctx.Command.QualifiedName()),
 				slog.String("source", ctx.Source.String()),
-				slog.String("user_id", ctx.AuthorID()),
-				slog.String("guild_id", ctx.GuildID()),
-				slog.String("channel_id", ctx.ChannelID()),
+				slog.String("user_id", ctx.AuthorID().String()),
+				slog.String("guild_id", ctx.GuildID().String()),
+				slog.String("channel_id", ctx.ChannelID().String()),
 				slog.Duration("duration", time.Since(start)),
 			}
 

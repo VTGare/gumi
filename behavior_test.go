@@ -4,7 +4,11 @@ import (
 	"strings"
 	"time"
 
-	"github.com/bwmarrin/discordgo"
+	"github.com/disgoorg/disgo/bot"
+	"github.com/disgoorg/disgo/discord"
+	"github.com/disgoorg/snowflake/v2"
+
+	"github.com/VTGare/gumi/v2/gumitest"
 
 	"github.com/onsi/ginkgo/v2"
 	"github.com/onsi/gomega"
@@ -49,17 +53,17 @@ var _ = ginkgo.Describe("Parsing prefix values", func() {
 	)
 
 	ginkgo.DescribeTable("resolves mentionables to users or roles",
-		func(text, id string, user, role bool) {
+		func(text string, id snowflake.ID, user, role bool) {
 			v, err := parse(Mentionable("m", "d"), text)
 			gomega.Expect(err).NotTo(gomega.HaveOccurred())
 			gomega.Expect(v.ID()).To(gomega.Equal(id))
 			gomega.Expect(v.IsUser()).To(gomega.Equal(user))
 			gomega.Expect(v.IsRole()).To(gomega.Equal(role))
 		},
-		ginkgo.Entry("user mention", "<@123456789012345678>", "123456789012345678", true, false),
-		ginkgo.Entry("nick mention", "<@!123456789012345678>", "123456789012345678", true, false),
-		ginkgo.Entry("role mention", "<@&123456789012345678>", "123456789012345678", false, true),
-		ginkgo.Entry("bare ID", "123456789012345678", "123456789012345678", false, false),
+		ginkgo.Entry("user mention", "<@123456789012345678>", snowflake.ID(123456789012345678), true, false),
+		ginkgo.Entry("nick mention", "<@!123456789012345678>", snowflake.ID(123456789012345678), true, false),
+		ginkgo.Entry("role mention", "<@&123456789012345678>", snowflake.ID(123456789012345678), false, true),
+		ginkgo.Entry("bare ID", "123456789012345678", snowflake.ID(123456789012345678), false, false),
 	)
 
 	ginkgo.It("parses booleans in several spellings", func() {
@@ -86,32 +90,30 @@ var _ = ginkgo.Describe("Reading options", func() {
 	})
 
 	ginkgo.It("maps interaction options with resolved entities", func() {
-		user := &discordgo.User{ID: "1"}
-		opts := optionsFromInteraction(nil, "g", []*discordgo.ApplicationCommandInteractionDataOption{
-			{Name: "who", Type: OptionUser, Value: "1"},
-			{Name: "n", Type: OptionInteger, Value: float64(3)},
-		}, &discordgo.ApplicationCommandInteractionDataResolved{Users: map[string]*discordgo.User{"1": user}})
+		i := gumitest.Command(1, "x", gumitest.User("who", 7), gumitest.Int("n", 3)).
+			WithResolved("users", map[string]any{"7": map[string]any{"id": "7", "username": "vt"}}).
+			Parse().(discord.ApplicationCommandInteraction)
+		data := i.SlashCommandInteractionData()
+		opts := optionsFromSlash(nil, 0, data.Options, &data.Resolved)
 
-		gomega.Expect(opts.User("who")).To(gomega.Equal(user))
+		gomega.Expect(opts.User("who").Username).To(gomega.Equal("vt"))
+		gomega.Expect(opts.Member("who")).To(gomega.BeNil())
 		gomega.Expect(opts.Int("n")).To(gomega.Equal(int64(3)))
 		gomega.Expect(opts.Get("n").Raw()).To(gomega.Equal("3"))
 	})
 })
 
 var _ = ginkgo.Describe("Matching prefixes", func() {
-	session := func() *discordgo.Session {
-		s := &discordgo.Session{State: discordgo.NewState()}
-		s.State.User = &discordgo.User{ID: "99", Username: "bot"}
-		return s
+	client := func() *bot.Client {
+		c, _ := gumitest.NewClient()
+		return c
 	}
-	msg := func(content string) *discordgo.MessageCreate {
-		return &discordgo.MessageCreate{Message: &discordgo.Message{Content: content}}
-	}
+	msg := func(content string) discord.Message { return discord.Message{Content: content} }
 
 	ginkgo.DescribeTable("picks the longest matching prefix",
 		func(prefixes []string, content, wantPrefix, wantRest string, wantOK bool) {
 			r := New(Config{Prefixes: prefixes})
-			p, rest, ok := r.matchPrefix(session(), msg(content))
+			p, rest, ok := r.matchPrefix(client(), msg(content))
 
 			gomega.Expect(ok).To(gomega.Equal(wantOK))
 			gomega.Expect(p).To(gomega.Equal(wantPrefix))
@@ -119,31 +121,31 @@ var _ = ginkgo.Describe("Matching prefixes", func() {
 		},
 		ginkgo.Entry("longest wins", []string{"bt", "bt!"}, "bt!help", "bt!", "help", true),
 		ginkgo.Entry("case-insensitive", []string{"bt!"}, "BT!help", "bt!", "help", true),
-		ginkgo.Entry("mention", []string{"bt!"}, "<@99> help", "<@99>", " help", true),
-		ginkgo.Entry("nick mention", []string{"bt!"}, "<@!99>help", "<@!99>", "help", true),
+		ginkgo.Entry("mention", []string{"bt!"}, "<@1001> help", "<@1001>", " help", true),
+		ginkgo.Entry("nick mention", []string{"bt!"}, "<@!1001>help", "<@!1001>", "help", true),
 		ginkgo.Entry("no match", []string{"bt!"}, "hello", "", "", false),
 		ginkgo.Entry("empty prefixes skipped", []string{""}, "hello", "", "", false),
 	)
 
 	ginkgo.It("ignores mentions when disabled", func() {
 		r := New(Config{Prefixes: []string{"bt!"}, DisableMentionPrefix: true})
-		_, _, ok := r.matchPrefix(session(), msg("<@99> help"))
+		_, _, ok := r.matchPrefix(client(), msg("<@1001> help"))
 		gomega.Expect(ok).To(gomega.BeFalse())
 	})
 })
 
 var _ = ginkgo.Describe("Permission checks", func() {
-	interactionCtx := func(guildID string, member, app int64) *Context {
-		return &Context{Interaction: &discordgo.InteractionCreate{Interaction: &discordgo.Interaction{
-			GuildID:        guildID,
-			Member:         &discordgo.Member{User: &discordgo.User{ID: "u"}, Permissions: member},
-			AppPermissions: app,
-		}}}
+	interactionCtx := func(inGuild bool, member, app discord.Permissions) *Context {
+		i := gumitest.Command(1, "x").WithPermissions(member).WithAppPermissions(app)
+		if !inGuild {
+			i.InDM(9)
+		}
+		return &Context{Interaction: i.Parse()}
 	}
 
 	ginkgo.DescribeTable("HasPermissions",
-		func(guildID string, perms int64, pass bool) {
-			err := HasPermissions(discordgo.PermissionManageMessages)(interactionCtx(guildID, perms, 0))
+		func(inGuild bool, perms discord.Permissions, pass bool) {
+			err := HasPermissions(discord.PermissionManageMessages)(interactionCtx(inGuild, perms, 0))
 			if pass {
 				gomega.Expect(err).NotTo(gomega.HaveOccurred())
 			} else {
@@ -151,34 +153,39 @@ var _ = ginkgo.Describe("Permission checks", func() {
 				gomega.Expect(err.(*CheckError).Check).To(gomega.Equal("permissions"))
 			}
 		},
-		ginkgo.Entry("has it", "g", int64(discordgo.PermissionManageMessages), true),
-		ginkgo.Entry("admin", "g", int64(discordgo.PermissionAdministrator), true),
-		ginkgo.Entry("lacks it", "g", int64(discordgo.PermissionSendMessages), false),
-		ginkgo.Entry("outside guilds", "", int64(0), true),
+		ginkgo.Entry("has it", true, discord.PermissionManageMessages, true),
+		ginkgo.Entry("admin", true, discord.PermissionAdministrator, true),
+		ginkgo.Entry("lacks it", true, discord.PermissionSendMessages, false),
+		ginkgo.Entry("outside guilds", false, discord.Permissions(0), true),
 	)
 
 	ginkgo.DescribeTable("BotHasPermissions",
-		func(perms int64, pass bool) {
-			err := BotHasPermissions(discordgo.PermissionEmbedLinks)(interactionCtx("g", 0, perms))
+		func(perms discord.Permissions, pass bool) {
+			err := BotHasPermissions(discord.PermissionEmbedLinks)(interactionCtx(true, 0, perms))
 			if pass {
 				gomega.Expect(err).NotTo(gomega.HaveOccurred())
 			} else {
 				gomega.Expect(err.(*CheckError).Check).To(gomega.Equal("bot_permissions"))
 			}
 		},
-		ginkgo.Entry("has it", int64(discordgo.PermissionEmbedLinks), true),
-		ginkgo.Entry("lacks it", int64(0), false),
+		ginkgo.Entry("has it", discord.PermissionEmbedLinks, true),
+		ginkgo.Entry("lacks it", discord.Permissions(0), false),
 	)
 
 	ginkgo.It("checks NSFW on a thread's parent channel", func() {
-		s := &discordgo.Session{State: discordgo.NewState()}
-		guild := &discordgo.Guild{ID: "g"}
-		gomega.Expect(s.State.GuildAdd(guild)).To(gomega.Succeed())
-		gomega.Expect(s.State.ChannelAdd(&discordgo.Channel{ID: "parent", GuildID: "g", NSFW: true})).To(gomega.Succeed())
-		gomega.Expect(s.State.ChannelAdd(&discordgo.Channel{ID: "thread", GuildID: "g", ParentID: "parent", Type: discordgo.ChannelTypeGuildPublicThread})).To(gomega.Succeed())
+		c, _ := gumitest.NewClient()
+		guildID := snowflake.ID(10)
+		c.Caches.AddChannel(gumitest.GuildChannel(map[string]any{"id": "20", "guild_id": "10", "type": discord.ChannelTypeGuildText, "nsfw": true}))
+		c.Caches.AddChannel(gumitest.GuildChannel(map[string]any{
+			"id": "30", "guild_id": "10", "parent_id": "20", "type": discord.ChannelTypeGuildPublicThread,
+			"thread_metadata": map[string]any{"archive_timestamp": gumitest.Timestamp},
+		}))
 
-		ctx := &Context{Session: s, Message: &discordgo.Message{GuildID: "g", ChannelID: "thread"}}
+		ctx := &Context{Client: c, Message: &discord.Message{GuildID: &guildID, ChannelID: 30}}
 		gomega.Expect(NSFW(ctx)).To(gomega.Succeed())
+
+		c.Caches.AddChannel(gumitest.GuildChannel(map[string]any{"id": "20", "guild_id": "10", "type": discord.ChannelTypeGuildText}))
+		gomega.Expect(NSFW(ctx)).To(gomega.MatchError(gomega.ContainSubstring("nsfw")))
 	})
 })
 
@@ -211,13 +218,14 @@ var _ = ginkgo.Describe("Cooldowns", func() {
 	})
 
 	ginkgo.It("keys buckets by scope", func() {
-		ctx := &Context{Message: &discordgo.Message{GuildID: "g", ChannelID: "c", Author: &discordgo.User{ID: "u"}}}
-		dm := &Context{Message: &discordgo.Message{ChannelID: "dm", Author: &discordgo.User{ID: "u"}}}
+		guildID := snowflake.ID(1)
+		ctx := &Context{Message: &discord.Message{GuildID: &guildID, ChannelID: 2, Author: discord.User{ID: 3}}}
+		dm := &Context{Message: &discord.Message{ChannelID: 4, Author: discord.User{ID: 3}}}
 
-		gomega.Expect(NewCooldown(CooldownUser, 1, 0).Key(ctx)).To(gomega.Equal("u"))
-		gomega.Expect(NewCooldown(CooldownChannel, 1, 0).Key(ctx)).To(gomega.Equal("c"))
-		gomega.Expect(NewCooldown(CooldownGuild, 1, 0).Key(ctx)).To(gomega.Equal("g"))
-		gomega.Expect(NewCooldown(CooldownGuild, 1, 0).Key(dm)).To(gomega.Equal("dm"))
+		gomega.Expect(NewCooldown(CooldownUser, 1, 0).Key(ctx)).To(gomega.Equal("3"))
+		gomega.Expect(NewCooldown(CooldownChannel, 1, 0).Key(ctx)).To(gomega.Equal("2"))
+		gomega.Expect(NewCooldown(CooldownGuild, 1, 0).Key(ctx)).To(gomega.Equal("1"))
+		gomega.Expect(NewCooldown(CooldownGuild, 1, 0).Key(dm)).To(gomega.Equal("4"))
 		gomega.Expect(NewCooldown(CooldownGlobal, 1, 0).Key(ctx)).To(gomega.BeEmpty())
 	})
 })
@@ -226,22 +234,16 @@ var _ = ginkgo.Describe("Response edits", func() {
 	ginkgo.It("clears embeds and components that are not set", func() {
 		r := Text("hi")
 
-		we := r.webhookEdit()
-		gomega.Expect(*we.Content).To(gomega.Equal("hi"))
-		gomega.Expect(*we.Embeds).To(gomega.BeEmpty())
-		gomega.Expect(*we.Embeds).NotTo(gomega.BeNil())
-		gomega.Expect(*we.Components).NotTo(gomega.BeNil())
-
-		me := r.messageEdit("c", "m")
-		gomega.Expect(me.ID).To(gomega.Equal("m"))
-		gomega.Expect(me.Channel).To(gomega.Equal("c"))
-		gomega.Expect(*me.Embeds).NotTo(gomega.BeNil())
-		gomega.Expect(*me.Components).NotTo(gomega.BeNil())
+		u := r.messageUpdate()
+		gomega.Expect(*u.Content).To(gomega.Equal("hi"))
+		gomega.Expect(*u.Embeds).To(gomega.BeEmpty())
+		gomega.Expect(*u.Embeds).NotTo(gomega.BeNil())
+		gomega.Expect(*u.Components).NotTo(gomega.BeNil())
 	})
 
 	ginkgo.It("strips the ephemeral flag over prefix", func() {
-		send := Text("hi").Private().messageSend(nil, nil)
-		gomega.Expect(send.Flags & discordgo.MessageFlagsEphemeral).To(gomega.BeZero())
+		send := Text("hi").Private().channelMessage(nil, nil)
+		gomega.Expect(send.Flags.Has(discord.MessageFlagEphemeral)).To(gomega.BeFalse())
 	})
 })
 

@@ -1,11 +1,11 @@
 # gumi
 
-A [DiscordGo](https://github.com/bwmarrin/discordgo) command framework. You declare a command once and
+A [DisGo](https://github.com/disgoorg/disgo) command framework. You declare a command once and
 it runs as a slash command (or context menu command) and, optionally, as a classic prefixed message
 command. Handlers read `ctx.Options` and never care how they were invoked.
 
 ```sh
-go get github.com/VTGare/gumi
+go get github.com/VTGare/gumi/v2
 ```
 
 ## Example
@@ -14,7 +14,7 @@ go get github.com/VTGare/gumi
 r := gumi.New(gumi.Config{
 	Prefixes:              []string{"!"},
 	DisablePrefixCommands: false, // set true for a slash-only bot
-	OwnerIDs:              []string{"123456789012345678"},
+	OwnerIDs:              []snowflake.ID{123456789012345678},
 })
 
 r.Use(
@@ -38,11 +38,20 @@ r.MustRegister(&gumi.Command{
 	},
 })
 
-unbind := r.Bind(session) // after discordgo.New
-defer unbind()
+client, err := disgo.New(token,
+	bot.WithGatewayConfigOpts(gateway.WithIntents(gateway.IntentGuilds, gateway.IntentGuildMessages, gateway.IntentMessageContent)),
+	// Handlers can take a while, so they must not block the gateway.
+	bot.WithEventManagerConfigOpts(bot.WithAsyncEventsEnabled()),
+	bot.WithEventListeners(r),
+)
+if err != nil {
+	log.Fatal(err)
+}
 
-// After session.Open():
-if err := r.Sync(session); err != nil {
+if err := client.OpenGateway(ctx); err != nil {
+	log.Fatal(err)
+}
+if err := r.Sync(client); err != nil {
 	log.Fatal(err)
 }
 ```
@@ -59,8 +68,13 @@ if err := r.Sync(session); err != nil {
 - Built-in help command.
 - One reply API for both invocation kinds: `Reply`, `Defer`, `Edit`, `Followup`, ephemeral replies.
 - `Sync` bulk-overwrites application commands, globally or to a development guild.
+- `gumitest` builds interactions and messages the way Discord sends them and records REST calls,
+  so command tests run without Discord.
 
-## History
+## Notes for DisGo
 
-v0.x was the original 2020–2021 framework. v1 is a rewrite that grew out of
-[boe-tea-go](https://github.com/VTGare/boe-tea-go)'s router.
+- IDs are `snowflake.ID`; `GuildID()` is 0 outside guilds.
+- Enable async events, or a slow handler blocks the gateway.
+- Prefix commands read permissions, channels and members from the client's caches. Turn on the
+  cache flags you need (`cache.FlagMembers`, `cache.FlagChannels`, `cache.FlagRoles`).
+- Modal text inputs go in a `discord.LabelComponent`, which carries the label.

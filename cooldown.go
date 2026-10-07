@@ -61,16 +61,16 @@ func NewCooldown(scope CooldownScope, uses int, per time.Duration) *Cooldown {
 func (c *Cooldown) Key(ctx *Context) string {
 	switch c.Scope {
 	case CooldownChannel:
-		return ctx.ChannelID()
+		return ctx.ChannelID().String()
 	case CooldownGuild:
-		if g := ctx.GuildID(); g != "" {
-			return g
+		if g := ctx.GuildID(); g != 0 {
+			return g.String()
 		}
-		return ctx.ChannelID()
+		return ctx.ChannelID().String()
 	case CooldownGlobal:
 		return ""
 	default:
-		return ctx.AuthorID()
+		return ctx.AuthorID().String()
 	}
 }
 

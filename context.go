@@ -2,11 +2,15 @@ package gumi
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"sync"
 	"time"
 
-	"github.com/bwmarrin/discordgo"
+	"github.com/disgoorg/disgo/bot"
+	"github.com/disgoorg/disgo/discord"
+	"github.com/disgoorg/disgo/events"
+	"github.com/disgoorg/snowflake/v2"
 )
 
 type Source int
@@ -30,38 +34,41 @@ func (s Source) String() string {
 // it came from a slash command or a message. Exactly one of Message and
 // Interaction is set.
 type Context struct {
-	Session       *discordgo.Session
-	Router        *Router
-	Command       *Command
-	Source        Source
-	Prefix        string
-	Message       *discordgo.Message
-	Interaction   *discordgo.InteractionCreate
+	Client  *bot.Client
+	Router  *Router
+	Command *Command
+	Source  Source
+	Prefix  string
+	Message *discord.Message
+	// A discord.ApplicationCommandInteraction, or the
+	// discord.AutocompleteInteraction while checks gate suggestions.
+	Interaction   discord.Interaction
 	Options       *Options
-	TargetMessage *discordgo.Message
-	TargetUser    *discordgo.User
+	TargetMessage *discord.Message
+	TargetUser    *discord.User
 	// Guilds only; nil in DMs.
-	TargetMember *discordgo.Member
+	TargetMember *discord.Member
 	StartedAt    time.Time
 
-	ctx    context.Context
-	mu     sync.Mutex
-	values map[string]any
+	ctx       context.Context
+	responder events.InteractionResponderFunc
+	mu        sync.Mutex
+	values    map[string]any
 
 	responded   bool
 	deferred    bool
 	edited      bool
 	ephemeral   bool
-	lastMessage *discordgo.Message
+	lastMessage *discord.Message
 }
 
-func newContext(r *Router, s *discordgo.Session, cmd *Command) *Context {
+func newContext(r *Router, c *bot.Client, cmd *Command) *Context {
 	base := context.Background()
 	if r.cfg.BaseContext != nil {
 		base = r.cfg.BaseContext()
 	}
 	return &Context{
-		Session:   s,
+		Client:    c,
 		Router:    r,
 		Command:   cmd,
 		Options:   newOptions(),
@@ -104,151 +111,168 @@ func (c *Context) IsInteraction() bool { return c.Interaction != nil }
 
 func (c *Context) IsMessage() bool { return c.Message != nil }
 
-func (c *Context) GuildID() string {
+// 0 outside guilds.
+func (c *Context) GuildID() snowflake.ID {
 	if c.Interaction != nil {
-		return c.Interaction.GuildID
+		return idOrZero(c.Interaction.GuildID())
 	}
 
 	if c.Message != nil {
-		return c.Message.GuildID
+		return idOrZero(c.Message.GuildID)
 	}
 
-	return ""
+	return 0
 }
 
-func (c *Context) ChannelID() string {
+func (c *Context) ChannelID() snowflake.ID {
 	if c.Interaction != nil {
-		return c.Interaction.ChannelID
+		return interactionChannelID(c.Interaction)
 	}
 
 	if c.Message != nil {
 		return c.Message.ChannelID
 	}
 
-	return ""
+	return 0
 }
 
-func (c *Context) Author() *discordgo.User {
+func (c *Context) Author() *discord.User {
 	if c.Interaction != nil {
-		if c.Interaction.Member != nil && c.Interaction.Member.User != nil {
-			return c.Interaction.Member.User
-		}
-
-		return c.Interaction.User
+		u := c.Interaction.User()
+		return &u
 	}
 
 	if c.Message != nil {
-		return c.Message.Author
+		return &c.Message.Author
 	}
 
 	return nil
 }
 
-func (c *Context) AuthorID() string {
+func (c *Context) AuthorID() snowflake.ID {
 	if u := c.Author(); u != nil {
 		return u.ID
 	}
 
-	return ""
+	return 0
 }
 
-func (c *Context) Member() *discordgo.Member {
+// nil in DMs.
+func (c *Context) Member() *discord.Member {
 	if c.Interaction != nil {
-		return c.Interaction.Member
+		if m := c.Interaction.Member(); m != nil {
+			return &m.Member
+		}
+		return nil
 	}
 
 	if c.Message != nil && c.Message.Member != nil {
-		m := c.Message.Member
-		if m.User == nil {
+		m := *c.Message.Member
+		if m.User.ID == 0 {
 			m.User = c.Message.Author
 		}
 
-		if m.GuildID == "" {
-			m.GuildID = c.Message.GuildID
+		if m.GuildID == 0 {
+			m.GuildID = idOrZero(c.Message.GuildID)
 		}
 
-		return m
+		return &m
 	}
 
 	return nil
 }
 
-func (c *Context) Locale() discordgo.Locale {
+func (c *Context) Locale() discord.Locale {
 	if c.Interaction != nil {
-		return c.Interaction.Locale
+		return c.Interaction.Locale()
 	}
 
 	return ""
 }
 
-// Channel fetches the invoking channel (state cache first, then REST).
-func (c *Context) Channel() (*discordgo.Channel, error) {
+// Channel fetches the invoking channel (cache first, then REST).
+func (c *Context) Channel() (discord.Channel, error) {
 	return c.channel(c.ChannelID())
 }
 
-func (c *Context) channel(id string) (*discordgo.Channel, error) {
-	if c.Session.State != nil {
-		if ch, err := c.Session.State.Channel(id); err == nil {
+func (c *Context) channel(id snowflake.ID) (discord.Channel, error) {
+	if c.Client.Caches != nil {
+		if ch, ok := c.Client.Caches.Channel(id); ok {
 			return ch, nil
 		}
 	}
 
-	return c.Session.Channel(id)
+	return c.Client.Rest.GetChannel(id)
 }
 
-// Guild fetches the invoking guild (state cache first, then REST).
-func (c *Context) Guild() (*discordgo.Guild, error) {
+// Guild fetches the invoking guild (cache first, then REST).
+func (c *Context) Guild() (discord.Guild, error) {
 	id := c.GuildID()
-	if id == "" {
-		return nil, fmt.Errorf("gumi: not in a guild")
+	if id == 0 {
+		return discord.Guild{}, errors.New("gumi: not in a guild")
 	}
 
-	if c.Session.State != nil {
-		if g, err := c.Session.State.Guild(id); err == nil {
+	if c.Client.Caches != nil {
+		if g, ok := c.Client.Caches.Guild(id); ok {
 			return g, nil
 		}
 	}
 
-	return c.Session.Guild(id)
-}
-
-// Permissions are the invoker's channel permissions (all of them outside guilds).
-func (c *Context) Permissions() (int64, error) {
-	if c.GuildID() == "" {
-		return discordgo.PermissionAll, nil
+	g, err := c.Client.Rest.GetGuild(id, false)
+	if err != nil {
+		return discord.Guild{}, err
 	}
 
-	if c.Interaction != nil && c.Interaction.Member != nil {
-		return c.Interaction.Member.Permissions, nil
-	}
-
-	return c.userPermissions(c.AuthorID())
+	return g.Guild, nil
 }
 
-func (c *Context) BotPermissions() (int64, error) {
-	if c.GuildID() == "" {
-		return discordgo.PermissionAll, nil
+// Permissions are the invoker's channel permissions (all of them outside
+// guilds). Over prefix they come from the member, channel and role caches.
+func (c *Context) Permissions() (discord.Permissions, error) {
+	if c.GuildID() == 0 {
+		return discord.PermissionsAll, nil
 	}
 
 	if c.Interaction != nil {
-		return c.Interaction.AppPermissions, nil
-	}
-
-	if c.Session.State == nil || c.Session.State.User == nil {
-		return 0, fmt.Errorf("gumi: bot user unknown")
-	}
-
-	return c.userPermissions(c.Session.State.User.ID)
-}
-
-func (c *Context) userPermissions(userID string) (int64, error) {
-	if c.Session.State != nil {
-		if p, err := c.Session.State.UserChannelPermissions(userID, c.ChannelID()); err == nil {
-			return p, nil
+		if m := c.Interaction.Member(); m != nil {
+			return m.Permissions, nil
 		}
 	}
 
-	return c.Session.UserChannelPermissions(userID, c.ChannelID())
+	return c.cachedPermissions(c.AuthorID())
+}
+
+func (c *Context) BotPermissions() (discord.Permissions, error) {
+	if c.GuildID() == 0 {
+		return discord.PermissionsAll, nil
+	}
+
+	if c.Interaction != nil {
+		if p := c.Interaction.AppPermissions(); p != nil {
+			return *p, nil
+		}
+	}
+
+	return c.cachedPermissions(c.Client.ID())
+}
+
+func (c *Context) cachedPermissions(userID snowflake.ID) (discord.Permissions, error) {
+	caches := c.Client.Caches
+	if caches == nil || userID == 0 {
+		return 0, errors.New("gumi: permissions need the client's caches")
+	}
+
+	member, ok := caches.Member(c.GuildID(), userID)
+	if !ok {
+		return 0, fmt.Errorf("gumi: member %s is not cached", userID)
+	}
+
+	ch, ok := caches.Channel(c.ChannelID())
+	if !ok {
+		return 0, fmt.Errorf("gumi: channel %s is not cached", c.ChannelID())
+	}
+
+	return caches.MemberPermissionsInChannel(ch, member), nil
 }
 
 // DisplayPrefix is the used prefix, falling back to the guild's first one.
@@ -257,14 +281,14 @@ func (c *Context) DisplayPrefix() string {
 		return c.Prefix
 	}
 
-	if p := c.Router.Prefixes(c.Session, c.GuildID(), c.ChannelID()); len(p) > 0 {
+	if p := c.Router.Prefixes(c.Client, c.GuildID(), c.ChannelID()); len(p) > 0 {
 		return p[0]
 	}
 
-	return c.Router.mentionPrefix(c.Session)
+	return c.Router.mentionPrefix(c.Client)
 }
 
-func (c *Context) messageAttachments() []*discordgo.MessageAttachment {
+func (c *Context) messageAttachments() []discord.Attachment {
 	if c.Message != nil {
 		return c.Message.Attachments
 	}
@@ -273,14 +297,14 @@ func (c *Context) messageAttachments() []*discordgo.MessageAttachment {
 
 type Response struct {
 	Content         string
-	Embeds          []*discordgo.MessageEmbed
-	Components      []discordgo.MessageComponent
-	Files           []*discordgo.File
-	AllowedMentions *discordgo.MessageAllowedMentions
+	Embeds          []discord.Embed
+	Components      []discord.LayoutComponent
+	Files           []*discord.File
+	AllowedMentions *discord.AllowedMentions
 	// Invoker-only for interactions; ignored over prefix.
 	Ephemeral bool
 	TTS       bool
-	Flags     discordgo.MessageFlags
+	Flags     discord.MessageFlags
 }
 
 func Text(content string) *Response { return &Response{Content: content} }
@@ -289,103 +313,63 @@ func Textf(format string, args ...any) *Response {
 	return &Response{Content: fmt.Sprintf(format, args...)}
 }
 
-func Embed(embed *discordgo.MessageEmbed) *Response {
-	return &Response{Embeds: []*discordgo.MessageEmbed{embed}}
+func Embed(embed discord.Embed) *Response {
+	return &Response{Embeds: []discord.Embed{embed}}
 }
 
 func (r *Response) Private() *Response { r.Ephemeral = true; return r }
 
-func (r *Response) flags(ephemeral bool) discordgo.MessageFlags {
+func (r *Response) flags(ephemeral bool) discord.MessageFlags {
 	f := r.Flags
 	if ephemeral || r.Ephemeral {
-		f |= discordgo.MessageFlagsEphemeral
+		f = f.Add(discord.MessageFlagEphemeral)
 	}
 	return f
 }
 
-func (r *Response) interactionData(ephemeral bool) *discordgo.InteractionResponseData {
-	return &discordgo.InteractionResponseData{
-		TTS:             r.TTS,
-		Content:         r.Content,
-		Components:      r.Components,
-		Embeds:          r.Embeds,
-		AllowedMentions: r.AllowedMentions,
-		Files:           r.Files,
-		Flags:           r.flags(ephemeral),
-	}
-}
-
-func (r *Response) webhookParams(ephemeral bool) *discordgo.WebhookParams {
-	return &discordgo.WebhookParams{
+func (r *Response) messageCreate(ephemeral bool) discord.MessageCreate {
+	return discord.MessageCreate{
 		Content:         r.Content,
 		TTS:             r.TTS,
-		Files:           r.Files,
-		Components:      r.Components,
 		Embeds:          r.Embeds,
+		Components:      r.Components,
+		Files:           r.Files,
 		AllowedMentions: r.AllowedMentions,
 		Flags:           r.flags(ephemeral),
 	}
 }
 
-// editFields is the edit payload. Unset embeds and components become empty
-// so the edit clears them instead of keeping the old ones.
-func (r *Response) editFields() (*string, *[]*discordgo.MessageEmbed, *[]discordgo.MessageComponent) {
+// messageUpdate is the edit payload. Unset embeds and components become
+// empty so the edit clears them instead of keeping the old ones.
+func (r *Response) messageUpdate() discord.MessageUpdate {
 	content := r.Content
 	embeds := r.Embeds
 	if embeds == nil {
-		embeds = []*discordgo.MessageEmbed{}
+		embeds = []discord.Embed{}
 	}
 
 	components := r.Components
 	if components == nil {
-		components = []discordgo.MessageComponent{}
+		components = []discord.LayoutComponent{}
 	}
 
-	return &content, &embeds, &components
-}
-
-func (r *Response) webhookEdit() *discordgo.WebhookEdit {
-	content, embeds, components := r.editFields()
-
-	return &discordgo.WebhookEdit{
-		Content:         content,
-		Embeds:          embeds,
-		Components:      components,
+	return discord.MessageUpdate{
+		Content:         &content,
+		Embeds:          &embeds,
+		Components:      &components,
 		Files:           r.Files,
 		AllowedMentions: r.AllowedMentions,
 	}
 }
 
-func (r *Response) messageSend(ref *discordgo.MessageReference, defaultMentions *discordgo.MessageAllowedMentions) *discordgo.MessageSend {
-	am := r.AllowedMentions
-	if am == nil {
-		am = defaultMentions
+func (r *Response) channelMessage(ref *discord.MessageReference, defaultMentions *discord.AllowedMentions) discord.MessageCreate {
+	m := r.messageCreate(false)
+	m.Flags = m.Flags.Remove(discord.MessageFlagEphemeral)
+	m.MessageReference = ref
+	if m.AllowedMentions == nil {
+		m.AllowedMentions = defaultMentions
 	}
-
-	return &discordgo.MessageSend{
-		Content:         r.Content,
-		Embeds:          r.Embeds,
-		TTS:             r.TTS,
-		Components:      r.Components,
-		Files:           r.Files,
-		AllowedMentions: am,
-		Reference:       ref,
-		Flags:           r.Flags &^ discordgo.MessageFlagsEphemeral,
-	}
-}
-
-func (r *Response) messageEdit(channelID, messageID string) *discordgo.MessageEdit {
-	content, embeds, components := r.editFields()
-
-	return &discordgo.MessageEdit{
-		ID:              messageID,
-		Channel:         channelID,
-		Content:         content,
-		Embeds:          embeds,
-		Components:      components,
-		Files:           r.Files,
-		AllowedMentions: r.AllowedMentions,
-	}
+	return m
 }
 
 // Reply answers once over interactions (editing the deferred placeholder
@@ -401,17 +385,14 @@ func (c *Context) Reply(r *Response) error {
 	if c.Interaction != nil {
 		switch {
 		case !c.responded:
-			err := c.Session.InteractionRespond(c.Interaction.Interaction, &discordgo.InteractionResponse{
-				Type: discordgo.InteractionResponseChannelMessageWithSource,
-				Data: r.interactionData(c.ephemeral),
-			})
+			err := c.responder(discord.InteractionResponseTypeCreateMessage, r.messageCreate(c.ephemeral))
 			if err == nil {
 				c.responded = true
 			}
 
 			return err
 		case c.deferred && !c.edited:
-			msg, err := c.Session.InteractionResponseEdit(c.Interaction.Interaction, r.webhookEdit())
+			msg, err := c.Client.Rest.UpdateInteractionResponse(c.Interaction.ApplicationID(), c.Interaction.Token(), r.messageUpdate())
 			if err == nil {
 				c.edited = true
 				c.lastMessage = msg
@@ -419,7 +400,7 @@ func (c *Context) Reply(r *Response) error {
 
 			return err
 		default:
-			msg, err := c.Session.FollowupMessageCreate(c.Interaction.Interaction, true, r.webhookParams(c.ephemeral))
+			msg, err := c.Client.Rest.CreateFollowupMessage(c.Interaction.ApplicationID(), c.Interaction.Token(), r.messageCreate(c.ephemeral))
 			if err == nil {
 				c.lastMessage = msg
 			}
@@ -428,12 +409,12 @@ func (c *Context) Reply(r *Response) error {
 		}
 	}
 
-	var ref *discordgo.MessageReference
+	var ref *discord.MessageReference
 	if c.Message != nil && !c.Router.cfg.DisableReplyReference {
-		ref = c.Message.SoftReference()
+		ref = softReference(c.Message)
 	}
 
-	msg, err := c.Session.ChannelMessageSendComplex(c.ChannelID(), r.messageSend(ref, c.Router.cfg.AllowedMentions))
+	msg, err := c.Client.Rest.CreateMessage(c.ChannelID(), r.channelMessage(ref, c.Router.cfg.AllowedMentions))
 	if err == nil {
 		c.responded = true
 		c.lastMessage = msg
@@ -442,13 +423,19 @@ func (c *Context) Reply(r *Response) error {
 	return err
 }
 
+// Quotes m without failing the reply if m is gone.
+func softReference(m *discord.Message) *discord.MessageReference {
+	id, channelID := m.ID, m.ChannelID
+	return &discord.MessageReference{MessageID: &id, ChannelID: &channelID, GuildID: m.GuildID}
+}
+
 func (c *Context) ReplyText(content string) error { return c.Reply(Text(content)) }
 
 func (c *Context) Replyf(format string, args ...any) error {
 	return c.Reply(Textf(format, args...))
 }
 
-func (c *Context) ReplyEmbed(embed *discordgo.MessageEmbed) error { return c.Reply(Embed(embed)) }
+func (c *Context) ReplyEmbed(embed discord.Embed) error { return c.Reply(Embed(embed)) }
 
 func (c *Context) ReplyEphemeral(content string) error { return c.Reply(Text(content).Private()) }
 
@@ -473,15 +460,12 @@ func (c *Context) Defer() error {
 			return nil
 		}
 
-		var data *discordgo.InteractionResponseData
+		var data discord.InteractionResponseData
 		if c.ephemeral {
-			data = &discordgo.InteractionResponseData{Flags: discordgo.MessageFlagsEphemeral}
+			data = discord.MessageCreate{Flags: discord.MessageFlagEphemeral}
 		}
 
-		err := c.Session.InteractionRespond(c.Interaction.Interaction, &discordgo.InteractionResponse{
-			Type: discordgo.InteractionResponseDeferredChannelMessageWithSource,
-			Data: data,
-		})
+		err := c.responder(discord.InteractionResponseTypeDeferredCreateMessage, data)
 		if err == nil {
 			c.responded, c.deferred = true, true
 		}
@@ -490,7 +474,7 @@ func (c *Context) Defer() error {
 	}
 
 	if c.Message != nil {
-		return c.Session.ChannelTyping(c.ChannelID())
+		return c.Client.Rest.SendTyping(c.ChannelID())
 	}
 
 	return nil
@@ -511,7 +495,7 @@ func (c *Context) Edit(r *Response) error {
 	defer c.mu.Unlock()
 
 	if c.Interaction != nil {
-		msg, err := c.Session.InteractionResponseEdit(c.Interaction.Interaction, r.webhookEdit())
+		msg, err := c.Client.Rest.UpdateInteractionResponse(c.Interaction.ApplicationID(), c.Interaction.Token(), r.messageUpdate())
 		if err == nil {
 			c.edited = true
 			c.lastMessage = msg
@@ -524,7 +508,7 @@ func (c *Context) Edit(r *Response) error {
 		return ErrNoResponse
 	}
 
-	msg, err := c.Session.ChannelMessageEditComplex(r.messageEdit(c.lastMessage.ChannelID, c.lastMessage.ID))
+	msg, err := c.Client.Rest.UpdateMessage(c.lastMessage.ChannelID, c.lastMessage.ID, r.messageUpdate())
 	if err == nil {
 		c.lastMessage = msg
 	}
@@ -533,7 +517,7 @@ func (c *Context) Edit(r *Response) error {
 }
 
 // Followup sends an extra message, responding first if it has to.
-func (c *Context) Followup(r *Response) (*discordgo.Message, error) {
+func (c *Context) Followup(r *Response) (*discord.Message, error) {
 	if r == nil {
 		r = &Response{}
 	}
@@ -547,15 +531,15 @@ func (c *Context) Followup(r *Response) (*discordgo.Message, error) {
 			return c.OriginalResponse()
 		}
 
-		return c.Session.FollowupMessageCreate(c.Interaction.Interaction, true, r.webhookParams(c.ephemeral))
+		return c.Client.Rest.CreateFollowupMessage(c.Interaction.ApplicationID(), c.Interaction.Token(), r.messageCreate(c.ephemeral))
 	}
 
-	return c.Session.ChannelMessageSendComplex(c.ChannelID(), r.messageSend(nil, c.Router.cfg.AllowedMentions))
+	return c.Client.Rest.CreateMessage(c.ChannelID(), r.channelMessage(nil, c.Router.cfg.AllowedMentions))
 }
 
-func (c *Context) OriginalResponse() (*discordgo.Message, error) {
+func (c *Context) OriginalResponse() (*discord.Message, error) {
 	if c.Interaction != nil {
-		return c.Session.InteractionResponse(c.Interaction.Interaction)
+		return c.Client.Rest.GetInteractionResponse(c.Interaction.ApplicationID(), c.Interaction.Token())
 	}
 
 	c.mu.Lock()
@@ -571,7 +555,7 @@ func (c *Context) OriginalResponse() (*discordgo.Message, error) {
 // Delete removes the original response (interactions) or the last reply.
 func (c *Context) Delete() error {
 	if c.Interaction != nil {
-		return c.Session.InteractionResponseDelete(c.Interaction.Interaction)
+		return c.Client.Rest.DeleteInteractionResponse(c.Interaction.ApplicationID(), c.Interaction.Token())
 	}
 
 	c.mu.Lock()
@@ -582,7 +566,7 @@ func (c *Context) Delete() error {
 		return ErrNoResponse
 	}
 
-	return c.Session.ChannelMessageDelete(msg.ChannelID, msg.ID)
+	return c.Client.Rest.DeleteMessage(msg.ChannelID, msg.ID)
 }
 
 // Responded reports whether an initial response (or Defer) has been sent.
@@ -591,4 +575,12 @@ func (c *Context) Responded() bool {
 	defer c.mu.Unlock()
 
 	return c.responded
+}
+
+// ID panics on an interaction without a channel object.
+func interactionChannelID(i discord.Interaction) snowflake.ID {
+	if ch := i.Channel(); ch.MessageChannel != nil {
+		return ch.ID()
+	}
+	return 0
 }

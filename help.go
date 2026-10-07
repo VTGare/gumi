@@ -7,7 +7,9 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/bwmarrin/discordgo"
+	"github.com/disgoorg/disgo/bot"
+	"github.com/disgoorg/disgo/discord"
+	"github.com/disgoorg/snowflake/v2"
 )
 
 // HelpConfig customises the built-in help command.
@@ -102,12 +104,12 @@ func HelpCommand(cfg HelpConfig) *Command {
 // helpView renders help for one invoker, in the syntax they invoked it with.
 type helpView struct {
 	r    *Router
-	s    *discordgo.Session
+	c    *bot.Client
 	cfg  HelpConfig
 	help *Command
 
-	guildID, channelID string
-	userID             string
+	guildID, channelID snowflake.ID
+	userID             snowflake.ID
 	// prefix is true when help was run as a prefix command, so prefix syntax
 	// is shown first.
 	prefix bool
@@ -118,7 +120,7 @@ type helpView struct {
 func newHelpView(ctx *Context, cfg HelpConfig, help *Command) *helpView {
 	return &helpView{
 		r:          ctx.Router,
-		s:          ctx.Session,
+		c:          ctx.Client,
 		cfg:        cfg,
 		help:       help,
 		guildID:    ctx.GuildID(),
@@ -143,14 +145,14 @@ func helpComponent(ctx *ComponentContext, cfg HelpConfig, help *Command) (resp *
 		arg = values[0]
 	}
 
-	if ctx.UserID() != ownerID {
+	if ctx.UserID().String() != ownerID {
 		return Textf("This menu belongs to someone else. Run `/%s` for your own.", cfg.Name).Private(), true
 	}
 
 	v := &helpView{
-		r: ctx.Router, s: ctx.Session, cfg: cfg, help: help,
+		r: ctx.Router, c: ctx.Client, cfg: cfg, help: help,
 		guildID: ctx.GuildID(), channelID: ctx.ChannelID(),
-		userID: ownerID, prefix: mode == "p",
+		userID: ctx.UserID(), prefix: mode == "p",
 	}
 
 	switch action {
@@ -172,11 +174,11 @@ func helpComponent(ctx *ComponentContext, cfg HelpConfig, help *Command) (resp *
 // syntax in help. It falls back to the used prefix, the mention prefix,
 // then "/".
 func (v *helpView) prefixLead() string {
-	if p := v.r.Prefixes(v.s, v.guildID, v.channelID); len(p) > 0 {
+	if p := v.r.Prefixes(v.c, v.guildID, v.channelID); len(p) > 0 {
 		return p[0]
 	}
 
-	return cmp.Or(v.usedPrefix, v.r.mentionPrefix(v.s), "/")
+	return cmp.Or(v.usedPrefix, v.r.mentionPrefix(v.c), "/")
 }
 
 // syntaxLead is the lead for c in the invoker's mode.
@@ -311,16 +313,17 @@ func (v *helpView) home() *Response {
 		desc += " Commands also work as slash commands."
 	}
 
-	embed := &discordgo.MessageEmbed{Title: v.cfg.Title, Color: v.cfg.Color, Description: desc}
+	embed := discord.Embed{Title: v.cfg.Title, Color: v.cfg.Color, Description: desc}
 	if v.cfg.Footer != "" {
-		embed.Footer = &discordgo.MessageEmbedFooter{Text: v.cfg.Footer}
+		embed.Footer = &discord.EmbedFooter{Text: v.cfg.Footer}
 	}
 
-	options := make([]discordgo.SelectMenuOption, 0, len(cats))
+	inline := true
+	options := make([]discord.StringSelectMenuOption, 0, len(cats))
 	for _, cat := range cats {
 		if len(embed.Fields) < maxEmbedFields {
-			embed.Fields = append(embed.Fields, &discordgo.MessageEmbedField{
-				Name: cat.name, Value: countNoun(len(cat.cmds), "command"), Inline: true,
+			embed.Fields = append(embed.Fields, discord.EmbedField{
+				Name: cat.name, Value: countNoun(len(cat.cmds), "command"), Inline: &inline,
 			})
 		}
 
@@ -330,7 +333,7 @@ func (v *helpView) home() *Response {
 		}
 
 		if len(options) < maxSelectOptions {
-			options = append(options, discordgo.SelectMenuOption{
+			options = append(options, discord.StringSelectMenuOption{
 				Label:       truncate(cat.name, maxSelectText),
 				Value:       truncate(cat.name, maxSelectText),
 				Description: truncate(strings.Join(names, ", "), maxSelectText),
@@ -350,7 +353,7 @@ func (v *helpView) category(name string) *Response {
 	cat := cats[idx]
 
 	lines := make([]string, 0, len(cat.cmds))
-	options := make([]discordgo.SelectMenuOption, 0, len(cat.cmds))
+	options := make([]discord.StringSelectMenuOption, 0, len(cat.cmds))
 	for _, c := range cat.cmds {
 		if c.Type == ChatInput {
 			lines = append(lines, v.commandRef(c)+" — "+c.Description)
@@ -359,7 +362,7 @@ func (v *helpView) category(name string) *Response {
 		}
 
 		if len(options) < maxSelectOptions {
-			options = append(options, discordgo.SelectMenuOption{
+			options = append(options, discord.StringSelectMenuOption{
 				Label:       truncate(helpLabel(v, c), maxSelectText),
 				Value:       encodeCommand(c),
 				Description: truncate(c.Description, maxSelectText),
@@ -367,8 +370,8 @@ func (v *helpView) category(name string) *Response {
 		}
 	}
 
-	embed := &discordgo.MessageEmbed{
-		Author:      &discordgo.MessageEmbedAuthor{Name: v.cfg.Title},
+	embed := discord.Embed{
+		Author:      &discord.EmbedAuthor{Name: v.cfg.Title},
 		Title:       cat.name,
 		Color:       v.cfg.Color,
 		Description: truncate(strings.Join(lines, "\n"), maxDescription),
@@ -396,8 +399,8 @@ func (v *helpView) detail(cmd *Command) *Response {
 		}
 	}
 
-	embed := &discordgo.MessageEmbed{
-		Author:      &discordgo.MessageEmbedAuthor{Name: v.categoryOf(cmd)},
+	embed := discord.Embed{
+		Author:      &discord.EmbedAuthor{Name: v.categoryOf(cmd)},
 		Title:       helpLabel(v, cmd),
 		Description: desc.String(),
 		Color:       v.cfg.Color,
@@ -413,7 +416,7 @@ func (v *helpView) detail(cmd *Command) *Response {
 			lines = append(lines, fmt.Sprintf("`%s` — %s", sub.Name, sub.Description))
 		}
 
-		addLinesField(embed, "Subcommands", lines)
+		addLinesField(&embed, "Subcommands", lines)
 	}
 
 	if len(cmd.Options) > 0 {
@@ -435,7 +438,7 @@ func (v *helpView) detail(cmd *Command) *Response {
 			lines = append(lines, line)
 		}
 
-		addLinesField(embed, "Options", lines)
+		addLinesField(&embed, "Options", lines)
 	}
 
 	if len(cmd.Examples) > 0 {
@@ -449,22 +452,21 @@ func (v *helpView) detail(cmd *Command) *Response {
 			name = "Examples"
 		}
 
-		addLinesField(embed, name, examples)
+		addLinesField(&embed, name, examples)
 	}
 
 	for _, c := range cmd.chain() {
 		if c.Cooldown != nil {
-			embed.Footer = &discordgo.MessageEmbedFooter{Text: "Cooldown: " + c.Cooldown.String()}
+			embed.Footer = &discord.EmbedFooter{Text: "Cooldown: " + c.Cooldown.String()}
 			break
 		}
 	}
 
 	cat := v.categoryOf(cmd)
-	buttons := []discordgo.MessageComponent{}
-	if b := v.button("Back to "+cat, "cat", cat); b != nil {
-		buttons = append(buttons, b)
+	buttons := []discord.InteractiveComponent{
+		v.button("Back to "+cat, "cat", cat),
+		v.button("All categories", "home", ""),
 	}
-	buttons = append(buttons, v.button("All categories", "home", ""))
 
 	return helpResponse(embed, buttonRow(buttons...))
 }
@@ -534,15 +536,15 @@ func (v *helpView) commandRef(c *Command) string {
 	return "`" + v.syntaxLead(c) + c.QualifiedName() + "`"
 }
 
-func helpResponse(embed *discordgo.MessageEmbed, rows ...discordgo.MessageComponent) *Response {
-	components := make([]discordgo.MessageComponent, 0, len(rows))
+func helpResponse(embed discord.Embed, rows ...discord.LayoutComponent) *Response {
+	components := make([]discord.LayoutComponent, 0, len(rows))
 	for _, row := range rows {
 		if row != nil {
 			components = append(components, row)
 		}
 	}
 
-	return &Response{Embeds: []*discordgo.MessageEmbed{embed}, Components: components}
+	return &Response{Embeds: []discord.Embed{embed}, Components: components}
 }
 
 // customID encodes a menu action; "" if it would exceed Discord's limit.
@@ -553,44 +555,41 @@ func (v *helpView) customID(action, arg string) string {
 	}
 
 	if arg == "" {
-		return ComponentID(v.help, v.userID, mode, action)
+		return ComponentID(v.help, v.userID.String(), mode, action)
 	}
 
-	return ComponentID(v.help, v.userID, mode, action, arg)
+	return ComponentID(v.help, v.userID.String(), mode, action, arg)
 }
 
-func (v *helpView) selectRow(action, placeholder string, options []discordgo.SelectMenuOption) discordgo.MessageComponent {
+func (v *helpView) selectRow(action, placeholder string, options []discord.StringSelectMenuOption) discord.LayoutComponent {
 	id := v.customID(action, "")
 	if id == "" || len(options) == 0 {
 		return nil
 	}
 
-	return discordgo.ActionsRow{Components: []discordgo.MessageComponent{
-		discordgo.SelectMenu{
-			MenuType:    discordgo.StringSelectMenu,
-			CustomID:    id,
-			Placeholder: placeholder,
-			Options:     options,
-		},
-	}}
+	return discord.NewActionRow(discord.StringSelectMenuComponent{
+		CustomID:    id,
+		Placeholder: placeholder,
+		Options:     options,
+	})
 }
 
-func (v *helpView) button(label, action, arg string) discordgo.MessageComponent {
+func (v *helpView) button(label, action, arg string) discord.InteractiveComponent {
 	id := v.customID(action, arg)
 	if id == "" {
 		return nil
 	}
 
-	return discordgo.Button{Label: truncate(label, 80), Style: discordgo.SecondaryButton, CustomID: id}
+	return discord.NewSecondaryButton(truncate(label, 80), id)
 }
 
-func buttonRow(buttons ...discordgo.MessageComponent) discordgo.MessageComponent {
-	kept := slices.DeleteFunc(buttons, func(b discordgo.MessageComponent) bool { return b == nil })
+func buttonRow(buttons ...discord.InteractiveComponent) discord.LayoutComponent {
+	kept := slices.DeleteFunc(buttons, func(b discord.InteractiveComponent) bool { return b == nil })
 	if len(kept) == 0 {
 		return nil
 	}
 
-	return discordgo.ActionsRow{Components: kept}
+	return discord.NewActionRow(kept...)
 }
 
 // encodeCommand is a command's select value: its type and qualified name,
@@ -690,7 +689,7 @@ func truncate(s string, limit int) string {
 	return string([]rune(s)[:limit-1]) + "…"
 }
 
-func addLinesField(e *discordgo.MessageEmbed, name string, lines []string) {
+func addLinesField(e *discord.Embed, name string, lines []string) {
 	if len(lines) == 0 {
 		return
 	}
@@ -703,9 +702,9 @@ func addLinesField(e *discordgo.MessageEmbed, name string, lines []string) {
 		}
 		n := name
 		if !first {
-			n = "​"
+			n = "\u200b"
 		}
-		e.Fields = append(e.Fields, &discordgo.MessageEmbedField{Name: n, Value: b.String()})
+		e.Fields = append(e.Fields, discord.EmbedField{Name: n, Value: b.String()})
 		b.Reset()
 		first = false
 	}

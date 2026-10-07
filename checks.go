@@ -1,12 +1,12 @@
 package gumi
 
 import (
-	"github.com/bwmarrin/discordgo"
+	"github.com/disgoorg/disgo/discord"
 )
 
 // GuildOnly rejects invocations outside of guilds.
 var GuildOnly Check = func(ctx *Context) error {
-	if ctx.GuildID() == "" {
+	if ctx.GuildID() == 0 {
 		return &CheckError{Check: "guild_only", Message: "This command can only be used in a server."}
 	}
 
@@ -15,7 +15,7 @@ var GuildOnly Check = func(ctx *Context) error {
 
 // DMOnly rejects invocations inside guilds.
 var DMOnly Check = func(ctx *Context) error {
-	if ctx.GuildID() != "" {
+	if ctx.GuildID() != 0 {
 		return &CheckError{Check: "dm_only", Message: "This command can only be used in DMs."}
 	}
 
@@ -25,7 +25,7 @@ var DMOnly Check = func(ctx *Context) error {
 // NSFW rejects invocations in non-NSFW guild channels. DMs are allowed.
 // Threads inherit the flag from their parent channel.
 var NSFW Check = func(ctx *Context) error {
-	if ctx.GuildID() == "" {
+	if ctx.GuildID() == 0 {
 		return nil
 	}
 
@@ -33,17 +33,14 @@ var NSFW Check = func(ctx *Context) error {
 	if err != nil {
 		return err
 	}
-
-	if ch.IsThread() && ch.ParentID != "" {
-		if ch, err = ctx.channel(ch.ParentID); err != nil {
+	if th, ok := ch.(discord.GuildThread); ok && th.ParentID() != nil {
+		if ch, err = ctx.channel(*th.ParentID()); err != nil {
 			return err
 		}
 	}
-
-	if !ch.NSFW {
+	if mc, ok := ch.(discord.GuildMessageChannel); !ok || !mc.NSFW() {
 		return &CheckError{Check: "nsfw", Message: "This command can only be used in NSFW channels."}
 	}
-
 	return nil
 }
 
@@ -58,21 +55,21 @@ var OwnerOnly Check = func(ctx *Context) error {
 
 // HasPermissions needs all the given channel permissions (admins pass).
 // Outside guilds it passes.
-func HasPermissions(permissions int64) Check {
+func HasPermissions(permissions discord.Permissions) Check {
 	return permissionCheck(permissions, (*Context).Permissions,
 		"permissions", "You don't have permission to use this command.")
 }
 
 // BotHasPermissions needs all the given channel permissions for the bot.
 // Outside guilds it passes.
-func BotHasPermissions(permissions int64) Check {
+func BotHasPermissions(permissions discord.Permissions) Check {
 	return permissionCheck(permissions, (*Context).BotPermissions,
 		"bot_permissions", "I'm missing the permissions required to run this command.")
 }
 
-func permissionCheck(permissions int64, get func(*Context) (int64, error), name, message string) Check {
+func permissionCheck(permissions discord.Permissions, get func(*Context) (discord.Permissions, error), name, message string) Check {
 	return func(ctx *Context) error {
-		if ctx.GuildID() == "" {
+		if ctx.GuildID() == 0 {
 			return nil
 		}
 
@@ -81,7 +78,7 @@ func permissionCheck(permissions int64, get func(*Context) (int64, error), name,
 			return err
 		}
 
-		if p&discordgo.PermissionAdministrator != 0 || p&permissions == permissions {
+		if p.Has(discord.PermissionAdministrator) || p.Has(permissions) {
 			return nil
 		}
 

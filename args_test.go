@@ -1,14 +1,16 @@
 package gumi
 
 import (
-	"github.com/bwmarrin/discordgo"
+	"github.com/disgoorg/disgo/discord"
+	"github.com/disgoorg/snowflake/v2"
 
 	"github.com/onsi/ginkgo/v2"
 	"github.com/onsi/gomega"
 )
 
 func testCtx() *Context {
-	return &Context{Message: &discordgo.Message{GuildID: "1"}}
+	guildID := snowflake.ID(1)
+	return &Context{Message: &discord.Message{GuildID: &guildID}}
 }
 
 func testOK(_ *Context) error { return nil }
@@ -56,7 +58,7 @@ var _ = ginkgo.Describe("Parsing prefix options", func() {
 		gomega.Expect(err).NotTo(gomega.HaveOccurred())
 		gomega.Expect(opts.Int("count")).To(gomega.Equal(int64(5)))
 		gomega.Expect(opts.Bool("flag")).To(gomega.BeTrue())
-		gomega.Expect(opts.ID("channel")).To(gomega.Equal("123456789012345678"))
+		gomega.Expect(opts.ID("channel")).To(gomega.Equal(snowflake.ID(123456789012345678)))
 		gomega.Expect(opts.String("query")).To(gomega.Equal(`some long "quoted" query`))
 	})
 
@@ -169,10 +171,10 @@ var _ = ginkgo.Describe("Validating commands", func() {
 		gomega.Expect(good.Subcommands[1].Subcommands[0].QualifiedName()).To(gomega.Equal("set channel add"))
 		gomega.Expect(good.Subcommands[0].Usage("bt!")).To(gomega.Equal("bt!set prefix <value>"))
 
-		ac := good.applicationCommand()
+		ac := good.applicationCommand().(discord.SlashCommandCreate)
 
 		gomega.Expect(ac.Options).To(gomega.HaveLen(2))
-		gomega.Expect(ac.Options[1].Type).To(gomega.Equal(discordgo.ApplicationCommandOptionSubCommandGroup))
+		gomega.Expect(ac.Options[1].Type()).To(gomega.Equal(discord.ApplicationCommandOptionTypeSubCommandGroup))
 	})
 })
 

@@ -6,9 +6,10 @@ import (
 	"errors"
 	"log/slog"
 
-	"github.com/VTGare/gumi"
-	"github.com/VTGare/gumi/middleware"
-	"github.com/bwmarrin/discordgo"
+	"github.com/VTGare/gumi/v2"
+	"github.com/VTGare/gumi/v2/middleware"
+	"github.com/disgoorg/disgo/discord"
+	"github.com/disgoorg/snowflake/v2"
 
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
@@ -19,9 +20,10 @@ var _ = Describe("Logging", func() {
 		var buf bytes.Buffer
 		logger := slog.New(slog.NewJSONHandler(&buf, nil))
 
+		guildID := snowflake.ID(1)
 		ctx := &gumi.Context{
 			Command: &gumi.Command{Name: "ping"},
-			Message: &discordgo.Message{GuildID: "g", ChannelID: "c", Author: &discordgo.User{ID: "u", Username: "vt"}},
+			Message: &discord.Message{GuildID: &guildID, ChannelID: 2, Author: discord.User{ID: 3, Username: "vt"}},
 		}
 
 		got := middleware.Logging(logger)(func(*gumi.Context) error { return err })(ctx)
@@ -43,9 +45,9 @@ var _ = Describe("Logging", func() {
 		Expect(entry).To(HaveKeyWithValue("msg", "command executed"))
 		Expect(entry).To(HaveKeyWithValue("command", "ping"))
 		Expect(entry).To(HaveKeyWithValue("source", "message"))
-		Expect(entry).To(HaveKeyWithValue("user_id", "u"))
-		Expect(entry).To(HaveKeyWithValue("guild_id", "g"))
-		Expect(entry).To(HaveKeyWithValue("channel_id", "c"))
+		Expect(entry).To(HaveKeyWithValue("user_id", "3"))
+		Expect(entry).To(HaveKeyWithValue("guild_id", "1"))
+		Expect(entry).To(HaveKeyWithValue("channel_id", "2"))
 		Expect(entry).To(HaveKeyWithValue("user", "vt"))
 		Expect(entry).To(HaveKey("duration"))
 	})
