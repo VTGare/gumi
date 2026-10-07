@@ -227,7 +227,8 @@ func (c *Context) Guild() (discord.Guild, error) {
 }
 
 // Permissions are the invoker's channel permissions (all of them outside
-// guilds). Over prefix they come from the member, channel and role caches.
+// guilds). Over prefix they come from the message's member and the channel
+// and role caches.
 func (c *Context) Permissions() (discord.Permissions, error) {
 	if c.GuildID() == 0 {
 		return discord.PermissionsAll, nil
@@ -237,6 +238,11 @@ func (c *Context) Permissions() (discord.Permissions, error) {
 		if m := c.Interaction.Member(); m != nil {
 			return m.Permissions, nil
 		}
+	}
+
+	// DisGo doesn't cache message authors, so the cache rarely has them.
+	if m := c.Member(); m != nil {
+		return c.channelPermissions(*m)
 	}
 
 	return c.cachedPermissions(c.AuthorID())
@@ -265,6 +271,15 @@ func (c *Context) cachedPermissions(userID snowflake.ID) (discord.Permissions, e
 	member, ok := caches.Member(c.GuildID(), userID)
 	if !ok {
 		return 0, fmt.Errorf("gumi: member %s is not cached", userID)
+	}
+
+	return c.channelPermissions(member)
+}
+
+func (c *Context) channelPermissions(member discord.Member) (discord.Permissions, error) {
+	caches := c.Client.Caches
+	if caches == nil {
+		return 0, errors.New("gumi: permissions need the client's caches")
 	}
 
 	ch, ok := caches.Channel(c.ChannelID())

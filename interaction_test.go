@@ -254,6 +254,31 @@ var _ = ginkgo.Describe("Running prefix commands", func() {
 		gomega.Expect(body["message_reference"]).To(gomega.HaveKeyWithValue("message_id", "5000"))
 	})
 
+	ginkgo.It("checks permissions with the message's member when the author isn't cached", func() {
+		c, rec := gt.NewClient()
+		c.Caches.AddChannel(gt.GuildChannel(map[string]any{
+			"id": gt.ChannelID.String(), "guild_id": gt.GuildID.String(), "type": discord.ChannelTypeGuildText,
+		}))
+		c.Caches.AddRole(discord.Role{ID: gt.GuildID, GuildID: gt.GuildID})
+		c.Caches.AddRole(discord.Role{ID: 11, GuildID: gt.GuildID, Permissions: discord.PermissionManageGuild})
+
+		r := New(Config{Prefixes: []string{"!"}})
+		r.MustRegister(&Command{
+			Name: "set", Description: "d",
+			Checks:  []Check{HasPermissions(discord.PermissionManageGuild)},
+			Handler: func(ctx *Context) error { return ctx.Reply(Text("ok")) },
+		})
+
+		mod := gt.Message(c, gt.GuildID, gt.ChannelID, 7, "!set")
+		mod.Message.Member.RoleIDs = []snowflake.ID{11}
+		r.OnEvent(mod)
+		gomega.Expect(rec.Messages(gt.ChannelID)).To(gomega.Equal([]string{"ok"}))
+
+		r.OnEvent(gt.Message(c, gt.GuildID, gt.ChannelID, 8, "!set"))
+		gomega.Expect(rec.Messages(gt.ChannelID)).To(gomega.HaveLen(2))
+		gomega.Expect(rec.Messages(gt.ChannelID)[1]).NotTo(gomega.Equal("ok"))
+	})
+
 	ginkgo.It("passes other messages to the fallback and ignores bots", func() {
 		c, _ := gt.NewClient()
 		var fell int
