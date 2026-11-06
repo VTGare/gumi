@@ -506,8 +506,8 @@ func (v *Value) Channel() (*discord.ResolvedChannel, error) {
 
 func resolvedChannel(ch discord.Channel) *discord.ResolvedChannel {
 	r := &discord.ResolvedChannel{ID: ch.ID(), Name: ch.Name(), Type: ch.Type()}
-	if gc, ok := ch.(discord.GuildChannel); ok && gc.ParentID() != nil {
-		r.ParentID = *gc.ParentID()
+	if gc, ok := ch.(discord.GuildChannel); ok {
+		r.ParentID = gc.ParentID()
 	}
 	return r
 }

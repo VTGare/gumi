@@ -214,7 +214,7 @@ func (c *Context) Guild() (discord.Guild, error) {
 
 	if c.Client.Caches != nil {
 		if g, ok := c.Client.Caches.Guild(id); ok {
-			return g, nil
+			return g.Guild, nil
 		}
 	}
 
